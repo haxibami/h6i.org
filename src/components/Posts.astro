@@ -76,19 +76,20 @@ const { page } = Astro.props;
     h3::before {
       position: absolute;
       content: "";
-      width: 100%;
+      width: calc(100% + 1rem);
       height: 100%;
       bottom: 0;
-      left: 0;
-      border-bottom: 1px solid var(--ui-border);
-      transform-origin: left;
-      transform: scaleX(0);
+      left: -0.5rem;
+      background-color: var(--fg10);
+      transform-origin: bottom;
+      transform: scaleY(0);
       transition: transform 0.3s;
       transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+      z-index: -1;
     }
 
     &:hover h3::before {
-      transform: scaleX(1);
+      transform: scaleY(1);
     }
   }
 
@@ -99,7 +100,6 @@ const { page } = Astro.props;
   h3 {
     position: relative;
     width: fit-content;
-    overflow: hidden;
     text-overflow: ellipsis;
     display: -webkit-box;
     -webkit-line-clamp: 4;

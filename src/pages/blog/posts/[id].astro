@@ -31,8 +31,6 @@ const meta = await getEntry("data", "data");
 
 const { post } = Astro.props;
 
-const site = Astro.url.origin;
-
 const dateString = new Intl.DateTimeFormat("en-US", {
   year: "numeric",
   month: "short",
@@ -54,7 +52,10 @@ const lastmodString = new Intl.DateTimeFormat("en-US", {
     enabled: true,
     width: 1200,
     height: 630,
-    image: new URL(`/api/og/article/${post.collection}/${post.id}.png`, site),
+    image: new URL(
+      `/api/og/article/${post.collection}/${post.id}.png`,
+      Astro.url,
+    ),
     type: "article",
   }}
 >

@@ -23,32 +23,34 @@ interface Props {
 
 const { title, description, pagefind, header, footer, og } = Astro.props;
 
-const site = Astro.url.origin;
+const canonicalURL = new URL(Astro.url.pathname, Astro.site);
 ---
 
 <html lang="ja" data-pagefind-body={pagefind ? "" : null}>
   <head>
-    <meta charset="UTF-8" />
+    <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="icon" href="/favicon.ico" type="image/x-icon" sizes="48x48" />
     <title data-pagefind-meta="title">{title}</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon" sizes="48x48" />
+    <link rel="author" href={Astro.site} />
+    <link rel="canonical" href={canonicalURL} />
+    <link
+      rel="alternate"
+      type="application/rss+xml"
+      href={new URL("/rss.xml", Astro.url)}
+    />
+    <link rel="sitemap" href="/sitemap-index.xml" />
     <meta name="description" content={description} />
     <meta name="application-name" content={title} />
-    <link rel="author" href={site} />
     <meta name="author" content="haxibami" />
     <meta name="generator" content={Astro.generator} />
     <meta name="creator" content="haxibami" />
     <meta name="publisher" content="haxibami" />
-    <link
-      rel="alternate"
-      type="application/rss+xml"
-      href={new URL("/rss.xml", site).toString()}
-    />
-    <link rel="sitemap" href="/sitemap-index.xml" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
-    <meta property="og:url" content={Astro.url} />
+    <meta property="og:url" content={canonicalURL} />
     <meta property="og:site_name" content={title} />
+    <meta property="og:locale" content="ja_JP" />
     <meta name="twitter:site" content="@haxibami" />
     <meta name="twitter:creator" content="@haxibami" />
     <meta name="twitter:title" content={title} />
@@ -58,7 +60,7 @@ const site = Astro.url.origin;
         <>
           <meta
             property="og:image"
-            content={og.image ?? new URL("/kripcat_720.jpg", site).toString()}
+            content={og.image ?? new URL("/kripcat_720.jpg", Astro.url)}
             data-pagefind-meta={pagefind ? "image[content]" : null}
           />
           <meta property="og:image:width" content={`${og.width ?? 720}`} />

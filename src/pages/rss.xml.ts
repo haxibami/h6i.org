@@ -8,6 +8,7 @@ export async function GET(context: APIContext) {
     .sort((a, b) => a.data.date.getTime() - b.data.date.getTime())
     .reverse();
   return rss({
+    trailingSlash: false,
     title: meta?.data.top.title ?? "",
     description: meta?.data.top.description ?? "",
     site: context.url.origin,
@@ -18,7 +19,7 @@ export async function GET(context: APIContext) {
         description: post.data.description,
         pubDate: post.data.date,
         categories: post.data.tags,
-        link: `/${post.collection}/posts/${post.id}/`,
+        link: `/${post.collection}/posts/${post.id}`,
         enclosure: {
           url: ogImagePath,
           type: "image/png",

@@ -1,20 +1,18 @@
 ---
-const origin = Astro.url.origin;
+const blog = new URL("/blog", Astro.url);
 ---
 
 <!doctype html>
 <html lang="ja">
   <head>
-    <title>{`Redirecting to: ${origin}/blog`}</title>
-    <meta http-equiv="refresh" content=`0;url=${origin}/blog` />
+    <title>{`Redirecting to: ${blog}`}</title>
+    <meta http-equiv="refresh" content=`0;url=${blog}` />
     <meta name="robots" content="noindex" />
-    <link rel="canonical" href=`${origin}/blog` />
+    <link rel="canonical" href={blog} />
   </head>
   <body>
-    <a href=`${origin}/blog`>
-      Redirecting from <code>/blog/tags.html</code> to <code
-        >{`${origin}/blog`}</code
-      >
+    <a href={blog}>
+      Redirecting from <code>{Astro.url}</code> to <code>{blog}</code>
     </a>
   </body>
 </html>
