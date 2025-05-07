@@ -129,9 +129,4 @@ export default defineConfig({
     remotePatterns: [{ protocol: "https" }],
   },
   site: SITE.href,
-  experimental: {
-    svg: {
-      mode: "inline",
-    },
-  },
 });
