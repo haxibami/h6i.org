@@ -19,6 +19,5 @@ export async function getMetadata(url: string) {
     .catch(() => ({
       title: "Not Found",
       description: "Page not found",
-      image: null,
     }));
 }

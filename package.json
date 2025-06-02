@@ -64,7 +64,7 @@
     "remark-frontmatter": "5.0.0",
     "remark-gemoji": "8.0.0",
     "remark-math": "6.0.0",
-    "satori": "0.13.1",
+    "satori": "0.13.2",
     "sharp": "0.34.2",
     "shiki": "3.4.2",
     "tailwindcss": "4.1.8",
