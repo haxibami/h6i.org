@@ -55,7 +55,12 @@ export default defineConfig({
       keyframes: true,
       safelist: {
         standard: [/:hover$/],
-        variables: ["--font-mono"],
+        variables: [
+          "--font-mono",
+          "--code-bg",
+          "--uchu-yang",
+          "--uchu-yang-raw",
+        ],
       },
     }),
   ],
@@ -129,9 +134,4 @@ export default defineConfig({
     remotePatterns: [{ protocol: "https" }],
   },
   site: SITE.href,
-  experimental: {
-    svg: {
-      mode: "inline",
-    },
-  },
 });
