@@ -1,9 +1,7 @@
 import path from "node:path";
-
-import { visit } from "unist-util-visit";
-
 import type { Image, Root } from "mdast";
 import type { FormatEnum } from "sharp";
+import { visit } from "unist-util-visit";
 
 import { getBlur } from "./api";
 

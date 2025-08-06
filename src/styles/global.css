@@ -91,7 +91,7 @@ hr {
   border-top-width: 1.5px;
 }
 
-.budoux {
+[data-budoux] {
   word-break: keep-all;
   overflow-wrap: anywhere;
 }

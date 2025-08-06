@@ -1,2 +1,2 @@
-export { getMetadata } from "./embed";
 export { getBlur } from "./blur";
+export { getMetadata } from "./embed";

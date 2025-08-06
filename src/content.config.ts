@@ -11,6 +11,7 @@ const blog = defineCollection({
     tags: z.array(z.string()).optional(),
     emoji: z.string().optional().default("📝"),
     related: z.array(z.string()).optional(),
+    order: z.number().optional(),
   }),
 });
 

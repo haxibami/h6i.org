@@ -1,9 +1,20 @@
 ---
-import { budouxProcess } from "@/lib/budoux";
+import { loadDefaultJapaneseParser } from "budoux";
 
-const slotContent = await Astro.slots.render("default");
+interface Props {
+  text: string;
+}
 
-const parsed = budouxProcess(slotContent);
+const { text } = Astro.props;
 ---
 
-<Fragment set:html={parsed} />
+<>
+  {
+    loadDefaultJapaneseParser()
+      .parse(text)
+      .flatMap((value, index) => [
+        ...(index > 0 ? [<wbr />] : []),
+        <>{value}</>,
+      ])
+  }
+</>

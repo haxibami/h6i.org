@@ -1,6 +1,5 @@
-import fetchSiteMetadata from "fetch-site-metadata";
-
 import type { Metadata } from "fetch-site-metadata";
+import fetchSiteMetadata from "fetch-site-metadata";
 
 const metadataCache = new Map<string, Metadata>();
 

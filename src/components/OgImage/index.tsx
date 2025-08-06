@@ -1,11 +1,9 @@
 /** @jsxImportSource react */
 /** @jsxRuntime automatic */
 
-import { getBudouxParser } from "@/lib/budoux";
+import { loadDefaultJapaneseParser } from "budoux";
 import satori from "satori";
 import sharp from "sharp";
-
-const parser = getBudouxParser();
 
 const [ibmPlexFontData, robotoFontData, iconBuffer] = await Promise.all([
   Bun.file("./src/assets/IBMPlexSansJP-Bold.woff").arrayBuffer(),
@@ -25,7 +23,7 @@ const ogImage = async (text: string, date?: Date, emoji?: string) => {
       style={{
         fontFamily:
           "IBM Plex Sans JP, Roboto Mono, Noto Color Emoji, sans-serif",
-        backgroundColor: "#1e1e20",
+        backgroundColor: "#202225",
         color: "#e3e4e6",
         display: "flex",
         flexDirection: "row",
@@ -87,11 +85,13 @@ const ogImage = async (text: string, date?: Date, emoji?: string) => {
             lineHeight: "1.3",
           }}
         >
-          {parser.parse(text).map((word) => (
-            <span key={word} style={{ display: "block" }}>
-              {word}
-            </span>
-          ))}
+          {loadDefaultJapaneseParser()
+            .parse(text)
+            .map((word) => (
+              <span key={word} style={{ display: "block" }}>
+                {word}
+              </span>
+            ))}
         </div>
         <div
           style={{
@@ -183,7 +183,8 @@ const ogImage = async (text: string, date?: Date, emoji?: string) => {
       quality: 60,
     })
     .toBuffer();
-  return imgBuffer;
+  // TODO: remove casting
+  return imgBuffer as Promise<Buffer<ArrayBuffer>>;
 };
 
 export default ogImage;

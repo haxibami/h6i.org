@@ -1,7 +1,7 @@
 ---
 title: "Next.jsでブログをつくった"
 date: 2022-03-26
-lastmod: 2023-10-05
+lastmod: 2025-08-05
 description: "自作ブログの実装について"
 tags: ["tech", "web", "nextjs", "react"]
 emoji: "📝"
@@ -145,79 +145,9 @@ $e^{i\pi} + 1 = 0$ :arrow\_left: インライン数式
 
 ### Mermaid Diagram
 
-（2023/05/07 更新）
+（2025/07/28 更新）
 
-[rehype-mermaidjs](https://github.com/remcohaszing/rehype-mermaidjs)を使った。通常のMermaidの使い方では、クライアント側でJSを実行せざるを得ないが、このプラグインを使うとビルド時にヘッドレスChromiumで[^2] あらかじめSVGが描画され、静的にドキュメントに埋め込まれる。
-
-[^2]: こんなことのためにわざわざヘッドレスブラウザを使うのもアレだが、MermaidはNode.js上で動くDOMライブラリ（[JSDOM](https://github.com/jsdom/jsdom)や[happy-dom](https://github.com/capricorn86/happy-dom)等）には対応していない[ようなので](https://github.com/mermaid-js/mermaid/issues/559)、やむを得ずこうなっている。
-
-````md
-```mermaid
-sequenceDiagram
-Alice->>John: Hello John, how are you?
-loop Healthcheck
-    John->>John: Fight against hypochondria
-end
-Note right of John: Rational thoughts!
-John-->>Alice: Great!
-John->>Bob: How about you?
-Bob-->>John: Jolly good!
-```
-
-```mermaid
-stateDiagram-v2
-    state fork_state <<fork>>
-      [*] --> fork_state
-      fork_state --> State2
-      fork_state --> State3
-
-      state join_state <<join>>
-      State2 --> join_state
-      State3 --> join_state
-      join_state --> State4
-      State4 --> [*]
-```
-
-```mermaid
-pie
-"Dogs" : 386
-"Cats" : 85
-"Rats" : 15
-```
-````
-
-```mermaid
-sequenceDiagram
-Alice->>John: Hello John, how are you?
-loop Healthcheck
-    John->>John: Fight against hypochondria
-end
-Note right of John: Rational thoughts!
-John-->>Alice: Great!
-John->>Bob: How about you?
-Bob-->>John: Jolly good!
-```
-
-```mermaid
-stateDiagram-v2
-    state fork_state <<fork>>
-      [*] --> fork_state
-      fork_state --> State2
-      fork_state --> State3
-
-      state join_state <<join>>
-      State2 --> join_state
-      State3 --> join_state
-      join_state --> State4
-      State4 --> [*]
-```
-
-```mermaid
-pie
-"Dogs" : 386
-"Cats" : 85
-"Rats" : 15
-```
+かつては[rehype-mermaidjs](https://github.com/remcohaszing/rehype-mermaidjs)を使っていた。現在は[@beoe/rehype-d2](https://github.com/stereobooster/beoe/tree/main/packages/rehype-d2)に移行。
 
 ### シンタックスハイライト
 

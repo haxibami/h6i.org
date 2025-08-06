@@ -23,12 +23,13 @@ export async function getStaticPaths({
   const paginates = categories.flatMap((category) => {
     const posts = allPosts
       .filter((post) => post.data.tags?.includes(category))
-      .sort(
-        (a, b) =>
-          (a.data.lastmod ?? a.data.date).getTime() -
-          (b.data.lastmod ?? b.data.date).getTime(),
-      )
-      .reverse();
+      .sort((a, b) => {
+        const diff =
+          (b.data.lastmod ?? b.data.date).getTime() -
+          (a.data.lastmod ?? a.data.date).getTime();
+        const order = (b.data.order ?? 0) - (a.data.order ?? 0);
+        return diff === 0 ? order : diff;
+      });
     return paginate(posts, {
       pageSize: COUNT_PER_PAGE,
       params: { category },

@@ -61,8 +61,8 @@ const lastmodString = new Intl.DateTimeFormat("en-US", {
 >
   <header>
     <span class="emoji">{post.data.emoji}</span>
-    <Budoux><h1>{post.data.title}</h1></Budoux>
-    <Budoux><p>{post.data.description}</p></Budoux>
+    <h1 data-budoux><Budoux text={post.data.title} /></h1>
+    <p data-budoux><Budoux text={post.data.description} /></p>
     <Tags
       tags={post.data.tags}
       collectionKey={post.collection}

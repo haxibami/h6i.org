@@ -7,9 +7,6 @@ Personal website. Built with [Astro](https://astro.build) & [Bun](https://bun.sh
 
 ## Development
 
-> [!NOTE]
-> You need to have Google Chrome installed.
-
 ```sh
 bun install
 bun run dev

@@ -1,8 +1,6 @@
-import { SKIP, visit } from "unist-util-visit";
-
-import { isBareExternalLink } from "./mdast-util-node-is";
-
 import type { Root } from "mdast";
+import { SKIP, visit } from "unist-util-visit";
+import { isBareExternalLink } from "./mdast-util-node-is";
 
 const remarkLinkcard = () => {
   return (tree: Root) => {
@@ -11,6 +9,7 @@ const remarkLinkcard = () => {
         !parent ||
         typeof index !== "number" ||
         node.children.length !== 1 ||
+        parent.type === "listItem" ||
         !isBareExternalLink(node.children[0])
       ) {
         return;
@@ -21,6 +20,7 @@ const remarkLinkcard = () => {
         hProperties: {
           ...node.children[0].data?.hProperties,
           dataLinkcard: true,
+          dataPagefindIgnore: true,
         },
       };
 

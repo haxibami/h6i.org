@@ -1,7 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", ":timezone(Asia/Tokyo)"],
-  "schedule": ["before 4am on the first day of the month"],
+  "schedule": ["0 4 15 * *"],
   "dependencyDashboard": true,
   "packageRules": [
     {

@@ -4,15 +4,16 @@ import { getMetadata } from "@/lib/api";
 
 interface Props {
   href: string;
+  class?: string | null;
 }
 
-const props = Astro.props;
+const { href, class: className, ...props } = Astro.props;
 
-const { title, description } = await getMetadata(props.href);
+const { title, description } = await getMetadata(href);
 ---
 
 <div>
-  <a {...props} class="card">
+  <a href={href} class:list={[className, "card"]} {...props}>
     <div class="card-info">
       <div class="title">
         {title}
@@ -22,7 +23,7 @@ const { title, description } = await getMetadata(props.href);
       </div>
       <div class="hostname">
         <LinkIcon class="link-icon" />
-        <span>{new URL(props.href).hostname}</span>
+        <span>{new URL(href).hostname}</span>
       </div>
     </div>
   </a>

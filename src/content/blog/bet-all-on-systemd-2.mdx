@@ -1,0 +1,475 @@
+---
+title: "systemdに全部賭けろ（第二部）"
+date: 2025-08-06
+description: "Linuxでルータを作る（基本機能構築編）"
+tags: ["bet-all-on-systemd", "tech", "network", "linux"]
+emoji: "⚡"
+order: 2
+---
+
+***
+
+<details>
+  <summary>記事の構成について</summary>
+
+  第二部では、Linuxマシンをフレッツ網に接続し、基本的なルータ機能を構築する。
+
+  - [第一部：環境構築](./bet-all-on-systemd-1)
+  - [第二部：基本機能構築](./bet-all-on-systemd-2) :arrow\_left: 今回
+  - [第三部：HGW設置](./bet-all-on-systemd-3)
+</details>
+
+***
+
+## 手順2：基本的なルータ機能の構築
+
+第一部にて、すでに[ネットワーク構成の概要](./bet-all-on-systemd-1#ネットワーク構成)は述べた。そのため、第二部では設定例を主に示し、軽く注釈を加えるにとどめる。
+
+### インターフェースの準備
+
+最初に、必要な仮想インターフェースをすべて作成しておく。
+
+- ブリッジ（`br0`）の作成
+
+```systemd title="/etc/systemd/network/05-br0.netdev"
+[NetDev]
+Name=br0
+Kind=bridge
+# wan0からMACアドレス（ランダム化済み）を継承
+MACAddress=none
+```
+
+```systemd title="/etc/systemd/network/05-br0.link"
+[Match]
+OriginalName=br0
+
+[Link]
+# wan0からMACアドレス（ランダム化済み）を継承
+MACAddressPolicy=none
+```
+
+- VLAN用サブインターフェース（`home`、`hgw`）の作成
+
+```systemd title="/etc/systemd/network/10-home.netdev"
+[NetDev]
+Name=home
+Kind=vlan
+
+[VLAN]
+Id=10
+```
+
+```systemd title="/etc/systemd/network/15-hgw.netdev"
+[NetDev]
+Name=hgw
+Kind=vlan
+# 一応 home とは別のMACアドレスにしておく
+MACAddress=de:ad:be:ef:00:03
+
+[VLAN]
+Id=100
+```
+
+- サブインターフェースと物理インターフェース（`lan0`）の紐づけ
+
+```systemd title="/etc/systemd/network/01-lan0.network"
+[Match]
+Name=lan0
+
+[Network]
+VLAN=home
+VLAN=hgw
+LinkLocalAddressing=no
+LLMNR=no
+```
+
+- `br0`のメンバーに`wan0`を追加（`hgw`はあとで追加する）
+
+```systemd title="/etc/systemd/network/01-wan0.network"
+[Match]
+Name=wan0
+
+[Network]
+Bridge=br0
+```
+
+### フレッツ網への接続
+
+#### IPv6 IPoE
+
+DHCPv6クライアントを動かし、/56のプレフィックスを受け取る。
+
+受け取ったプレフィックスの一部（/64）から、通信用の一時アドレス（RFC 4941）と、IPv4 over IPv6用のCEアドレスも割り当てる。
+
+（ひかり電話関連情報の取得については次回触れる）
+
+```systemd title="/etc/systemd/network/05-br0.network"
+[Match]
+Name=br0
+
+[Link]
+RequiredForOnline=yes
+
+[Network]
+DHCP=ipv6
+# 起動ごとにリンクローカルアドレスを変える
+IPv6LinkLocalAddressGenerationMode=random
+IPv6Forwarding=yes
+IPv6AcceptRA=yes
+# 一時アドレスを割り当てる
+IPv6PrivacyExtensions=yes
+DHCPPrefixDelegation=yes
+Tunnel=mape0
+
+[Route]
+Gateway=_ipv6ra
+# TCPの初期ウィンドウサイズを大きくする
+InitialCongestionWindow=30
+InitialAdvertisedReceiveWindow=30
+
+[DHCPv6]
+DUIDType=link-layer
+IAID=0
+# DHCPv6リクエストに余分な情報を含めないようにする
+SendHostname=no
+UseCaptivePortal=no
+UseDNR=no
+
+[DHCPPrefixDelegation]
+UplinkInterface=:self
+SubnetId=0
+Announce=no
+# CEアドレスの後半64bit（= インターフェースID）を指定
+Token=::ce
+```
+
+CEアドレスは`Network.Address=`でも指定できるが、`DHCPPrefixDelegation.Token=`を使うと前半を書かずに済むため、少し楽だ。
+
+そのほか、起動ごとにランダムなリンクローカルアドレスを割り当てる設定や、[TCPの初期ウィンドウサイズを大きくする](https://wiki.archlinux.org/title/Systemd-networkd#Speeding_up_TCP_slow-start)設定もしている。
+
+#### IPv4 over IPv6
+
+トンネルデバイス（`mape0`）を作成し、その上にトンネルを張る。
+
+```systemd title="/etc/systemd/network/05-mape0.netdev"
+[NetDev]
+Name=mape0
+Kind=ip6tnl
+
+[Tunnel]
+Mode=ipip6
+# CEアドレス
+Local=3fff:0:0:ab00::ce
+# BRアドレス
+Remote=2001:db8::1
+DiscoverPathMTU=yes
+EncapsulationLimit=none
+```
+
+```systemd title="/etc/systemd/network/05-mape0.network"
+[Match]
+Name=mape0
+
+[Link]
+RequiredForOnline=yes
+
+[Network]
+BindCarrier=br0
+IPv4Forwarding=yes
+LinkLocalAddressing=no
+LLMNR=no
+# DefaultRouteOnDevice=yes
+
+[Route]
+Gateway=0.0.0.0
+InitialCongestionWindow=30
+InitialAdvertisedReceiveWindow=30
+```
+
+なお`[Route]` セクションの代わりに、`Network.DefaultRouteOnDevice=yes` を指定することもできる。初期ウィンドウサイズの指定が不要な場合、そちらのほうが楽だろう。
+
+#### MAP-E関連の設定
+
+[前回紹介した記事](https://turgenev.hatenablog.com/entry/2024/04/23/031222)に倣い、`tc`を使ったNATなどを設定する。iptablesの代わりにnftablesを使い、TCP MSSの自動調整を加えている点以外は、リンク先の記事と同じだ。
+
+MSSの調整・fwmarkの付与・ソースNATを行うnftablesのルールを書く。
+
+```NFTables title="/etc/nftables.d/lazy/mape0.nft"
+#!/usr/sbin/nft -f
+
+destroy table ip mape
+
+table ip mape {
+  chain mape-filter {
+    type filter hook postrouting priority filter; policy accept;
+    # TCP MSSの調整
+    iif "mape0" tcp flags syn tcp option maxseg size set rt mtu
+    oif "mape0" tcp flags syn tcp option maxseg size set rt mtu
+    # fwmarkの付与
+    oif "mape0" meta l4proto tcp meta mark set 0x54 counter
+    oif "mape0" meta l4proto udp meta mark set 0x55 counter
+  }
+
+  chain mape-snat {
+    type nat hook postrouting priority srcnat; policy accept;
+    # ソースNAT（IPv4アドレスは前回計算したものを使う）
+    oif "mape0" meta l4proto {tcp, udp, icmp} counter snat to 192.0.2.1:32784-33023
+  }
+}
+```
+
+起動時に実行すべき[^1]`tc`コマンドも、スクリプトにまとめておく。
+
+[^1]: `tc`コマンドの効果は永続しないため、再起動ごとに実行する必要がある
+
+```sh title="/usr/local/sbin/tc-mape0.sh"
+#!/usr/bin/env bash
+
+TUNNEL=mape0 # トンネルデバイスの名前
+PSID=ab      # ポートセットID（16進）
+
+# Out
+tc qdisc replace dev $TUNNEL root handle 1: htb
+
+tc filter add dev $TUNNEL parent 1: handle 0x55 fw action csum ip4h udp continue
+tc filter add dev $TUNNEL parent 1: handle 0x54 fw action csum ip4h tcp continue
+tc filter add dev $TUNNEL parent 1: handle 0x54/0xfffffffe fw action pedit pedit munge ip sport set "0x0${PSID}0" retain 0x0ff0 continue
+tc filter add dev $TUNNEL parent 1: u32 match mark 0x54 0xfffffffe match ip sport 0x0010 0x0010 action pedit pedit munge ip sport set 0x1000 retain 0x1000 continue
+tc filter add dev $TUNNEL parent 1: u32 match mark 0x54 0xfffffffe match ip sport 0x0020 0x0020 action pedit pedit munge ip sport set 0x2000 retain 0x2000 continue
+tc filter add dev $TUNNEL parent 1: u32 match mark 0x54 0xfffffffe match ip sport 0x0040 0x0040 action pedit pedit munge ip sport set 0x4000 retain 0x4000 continue
+tc filter add dev $TUNNEL parent 1: u32 match mark 0x54 0xfffffffe match ip sport 0x0000 0x0080 action pedit pedit munge ip sport set 0x0000 retain 0x8000 continue
+
+# ICMP echo reply
+tc filter add dev $TUNNEL parent 1: u32 match mark 0x59 0xffffffff action pedit pedit munge offset 24 u16 set "0x0${PSID}0" retain 0x0ff0 pipe action csum ip4h icmp continue
+tc filter add dev $TUNNEL parent 1: u32 match mark 0x59 0xffffffff match u16 0x0010 0x0010 at 24 action pedit pedit munge offset 24 u16 set 0x1000 retain 0x1000 continue
+tc filter add dev $TUNNEL parent 1: u32 match mark 0x59 0xffffffff match u16 0x0020 0x0020 at 24 action pedit pedit munge offset 24 u16 set 0x2000 retain 0x2000 continue
+tc filter add dev $TUNNEL parent 1: u32 match mark 0x59 0xffffffff match u16 0x0040 0x0040 at 24 action pedit pedit munge offset 24 u16 set 0x4000 retain 0x4000 continue
+tc filter add dev $TUNNEL parent 1: u32 match mark 0x59 0xffffffff match u16 0x0000 0x0080 at 24 action pedit pedit munge offset 24 u16 set 0x0000 retain 0x8000 continue
+tc filter add dev $TUNNEL parent 1: u32 match ip protocol 1 0xff match ip icmp_type 8 0xff match ip ihl 0x5 0xf match u16 0 1fff at 6 action skbedit mark 0x59 continue
+
+# In
+tc qdisc add dev $TUNNEL ingress handle ffff:
+
+tc filter add dev $TUNNEL parent ffff: handle 0x65 fw action csum ip4h udp continue
+tc filter add dev $TUNNEL parent ffff: handle 0x64 fw action csum ip4h tcp continue
+tc filter add dev $TUNNEL parent ffff: handle 0x64/0xfffffffe fw action pedit pedit munge ip dport set 0x8000 retain 0xf000 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x64 0xfffffffe match ip dport 0x8000 0x8000 action pedit pedit munge ip dport set 0x0080 retain 0x0080 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x64 0xfffffffe match ip dport 0x4000 0x4000 action pedit pedit munge ip dport set 0x0040 retain 0x0040 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x64 0xfffffffe match ip dport 0x2000 0x2000 action pedit pedit munge ip dport set 0x0020 retain 0x0020 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x64 0xfffffffe match ip dport 0x1000 0x1000 action pedit pedit munge ip dport set 0x0010 retain 0x0010 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x64 0xfffffffe action pedit pedit munge ip dport set 0 retain 0x0ff0 continue
+tc filter add dev $TUNNEL parent ffff: u32 match ip protocol 17 0xff match u16 0 1fff at 6 match ip dport "0x0${PSID}0" 0x0ff0 action skbedit mark 0x65 continue
+tc filter add dev $TUNNEL parent ffff: u32 match ip protocol 6 0xff match u16 0 1fff at 6 match ip dport "0x0${PSID}0" 0x0ff0 action skbedit mark 0x64 continue
+
+# ICMP echo request
+tc filter add dev $TUNNEL parent ffff: handle 0x69 fw action pedit pedit munge offset 24 u16 set 0x8000 retain 0xf000 pipe action csum ip4h icmp continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x69 0xffffffff match u16 0x8000 0x8000 at 24 action pedit pedit munge offset 24 u16 set 0x0080 retain 0x0080 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x69 0xffffffff match u16 0x4000 0x4000 at 24 action pedit pedit munge offset 24 u16 set 0x0040 retain 0x0040 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x69 0xffffffff match u16 0x2000 0x2000 at 24 action pedit pedit munge offset 24 u16 set 0x0020 retain 0x0020 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x69 0xffffffff match u16 0x1000 0x1000 at 24 action pedit pedit munge offset 24 u16 set 0x0010 retain 0x0010 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x69 0xffffffff action pedit pedit munge offset 24 u16 set 0 retain 0x0ff0 continue
+tc filter add dev $TUNNEL parent ffff: u32 match ip protocol 1 0xff match ip icmp_type 0 0xff match ip ihl 0x5 0xf match u16 0 1fff at 6 match u16 "0x0${PSID}0" 0x0ff0 at 24 action skbedit mark 0x69 continue
+
+# port unreachable
+tc filter add dev $TUNNEL parent ffff: handle 0x79 fw action pedit pedit munge offset 48 u16 set 0x8000 retain 0xf000 pipe action csum ip4h and icmp continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x79 0xffffffff match ip dport 0x8000 0x8000 at 48 action pedit pedit munge offset 48 u16 set 0x0080 retain 0x0080 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x79 0xffffffff match ip dport 0x4000 0x4000 at 48 action pedit pedit munge offset 48 u16 set 0x0040 retain 0x0040 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x79 0xffffffff match ip dport 0x2000 0x2000 at 48 action pedit pedit munge offset 48 u16 set 0x0020 retain 0x0020 continue
+tc filter add dev $TUNNEL parent ffff: u32 match mark 0x79 0xffffffff match ip dport 0x1000 0x1000 at 48 action pedit pedit munge offset 48 u16 set 0x0010 retain 0x0010 continue
+tc filter add dev $TUNNEL parent ffff: handle 0x79 fw action pedit pedit munge offset 48 u16 set 0 retain 0x0ff0 continue
+tc filter add dev $TUNNEL parent ffff: u32 match ip protocol 1 0xff match ip icmp_type 3 0xff match ip ihl 0x5 0xf match ip ihl 0x5 0xf at 28 match u16 0 1fff at 6 match ip sport "0x0${PSID}0" 0x0ff0 at 48 action skbedit mark 0x79 continue
+```
+
+起動後、`mape0`デバイスの存在が保証された時点でルールとスクリプトが適用されるよう、systemdサービスを設定する[^2]。
+
+[^2]: もちろん、nftablesのルールに関しては、全体の設定（`/etc/nftables.conf`）とまとめてもよい。しかし`mape0`デバイスの存在が保証されている場合、`iifname` / `oifname`[より高速な](https://serverfault.com/questions/985158/what-is-the-difference-between-iifname-and-iif-in-nftables/985167#985167)`iif` / `oif`という構文が使えるため、このようにしている）
+
+```systemd title="/etc/systemd/system/nftables-mape0.service"
+[Unit]
+Description=Apply nftables filter rules for mape0
+# 下のように書くと、このサービスはmape0デバイスの設定完了後に実行される
+After=sys-subsystem-net-devices-mape0.device nftables.service
+BindsTo=sys-subsystem-net-devices-mape0.device
+Requires=nftables.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/lazy/mape0.nft
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```systemd title="/etc/systemd/system/tc-mape0.service"
+[Unit]
+Description=Apply custom tc rules
+Wants=network-online.target
+After=network-online.target sys-subsystem-net-devices-mape0.device
+BindsTo=sys-subsystem-net-devices-mape0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/tc-mape0.sh
+ExecStop=/usr/sbin/tc filter del dev mape0 && /usr/sbin/tc filter del dev mape0 parent ffff:
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+systemctl enable nftables-mape0
+systemctl enable tc-mape0
+reboot
+```
+
+天地の運行が正常で、あなたが祝福されていれば、再起動後にIPv6 / IPv4の導通が取れるはずだ。
+
+```console
+> ping -c3 2606:4700:4700::1001
+PING 2606:4700:4700::1001 (2606:4700:4700::1001) 56 data bytes
+64 bytes from 2606:4700:4700::1001: icmp_seq=1 ttl=54 time=7.45 ms
+64 bytes from 2606:4700:4700::1001: icmp_seq=2 ttl=54 time=7.19 ms
+64 bytes from 2606:4700:4700::1001: icmp_seq=3 ttl=54 time=7.12 ms
+
+--- 2606:4700:4700::1001 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+rtt min/avg/max/mdev = 7.123/7.254/7.451/0.141 ms
+> ping -c3 1.0.0.1
+PING 1.0.0.1 (1.0.0.1) 56(84) bytes of data.
+64 bytes from 1.0.0.1: icmp_seq=1 ttl=58 time=7.36 ms
+64 bytes from 1.0.0.1: icmp_seq=2 ttl=58 time=7.17 ms
+64 bytes from 1.0.0.1: icmp_seq=3 ttl=58 time=7.84 ms
+
+--- 1.0.0.1 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+rtt min/avg/max/mdev = 7.172/7.458/7.839/0.280 ms
+```
+
+### 宅内機器側インターフェースの設定
+
+続いて宅内機器側のインターフェース（`home`）を設定する。IPv6はSLAAC + RDNSS、IPv4はDHCPv4を使う、オーソドックスな構成である。
+
+```systemd title="/etc/systemd/network/10-home.network" {23,28}
+[Match]
+Name=home
+
+[Network]
+IPv6StableSecretAddress=xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx
+IPv6Forwarding=yes
+IPv6AcceptRA=no
+IPv6SendRA=yes
+DHCPPrefixDelegation=yes
+
+Address=10.0.0.1/24
+DHCPServer=yes
+MulticastDNS=yes
+
+[DHCPPrefixDelegation]
+# このセグメントに/64のサブネット（3fff:0:0:ab01::/64）を割り当てる
+SubnetId=1
+# ただしインターフェース自体にはアドレスを割り振らない
+Assign=no
+
+# 割り当てたサブネットとDNSサーバをRAで配布する
+[IPv6SendRA]
+DNS=_link_local
+RouterLifetimeSec=9000
+DNSLifetimeSec=14400
+
+[DHCPServer]
+DNS=_server_address
+PoolOffset=32
+PoolSize=208
+DefaultLeaseTimeSec=24h
+MaxLeaseTimeSec=48h
+
+# IPv4の固定もお手のもの
+[DHCPServerStaticLease]
+MACAddress=de:ad:be:ef:00:04
+Address=10.0.0.2
+```
+
+先ほどWAN側（`br0`）にIPv6グローバルアドレスを付けたため、こちらのインターフェースには付けていない。
+
+`DNS=_link_local`や`DNS=_server_address`と書くことで、ルータ自身をDNSサーバとして広告できる。ルータ上で[DNSキャッシュサーバ](https://www.knot-resolver.cz/)を動かしているため、このようにした。
+
+```sh
+networkctl reload
+```
+
+設定を読み込んだ後、クライアント端末をスイッチの適切なポートに繋げば、ルータとして動作していることがわかるはずだ。
+
+**なお、この時点で接続した端末はインターネットに露出するので注意すること。**
+
+### ファイアウォール設定
+
+インターネット側から丸見えというのは怖いので、基本的なファイアウォールを設定しておく。以下の設定はとりあえずのものだが、最低限の機能は果たしてくれるだろう。
+
+```NFTables title="/etc/nftables.conf"
+#!/usr/bin/nft -f
+
+destroy table inet filter
+
+table inet filter {
+  set LANv4 {
+    type ipv4_addr; flags interval;
+    elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }
+  }
+
+  set LANv6 {
+    type ipv6_addr; flags interval;
+    elements = { fd00::/8, fe80::/10 }
+  }
+  
+  chain lan_input {
+    meta l4proto { tcp, udp } th dport { 22, 53 } accept comment "allow LAN services"
+  }
+
+  chain input {
+    type filter hook input priority filter; policy drop;
+
+    ct state invalid drop comment "early drop of invalid connections"
+    ct state { established, related } accept comment "allow tracked connections"
+    iif lo accept comment "allow from loopback"
+    ip6 nexthdr icmpv6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-request, echo-reply } limit rate 5/second burst 10 packets accept
+    ip6 nexthdr icmpv6 ip6 saddr fe80::/10 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, ind-neighbor-solicit, ind-neighbor-advert, 148, 149 } iifname "br0" accept
+    ip6 nexthdr icmpv6 icmpv6 type { mld-listener-query, mld-listener-report, mld-listener-done, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, ind-neighbor-solicit, ind-neighbor-advert, mld2-listener-report, 148, 149, 151, 152, 153 } iifname "home" accept
+    ip protocol icmp accept comment "allow icmp"
+    udp dport bootps ip saddr 0.0.0.0 ip daddr 255.255.255.255 iifname "home" accept comment "allow dhcpv4"
+    udp dport dhcpv6-server ip6 saddr fe80::/10 ip6 daddr ff02::1:2 iifname "home" accept comment "allow dhcpv6"
+    udp dport dhcpv6-client iifname "br0" accept
+    ip saddr @LANv4 jump lan_input comment "allow private services"
+    ip6 saddr @LANv6 iifname "home" jump lan_input comment "allow private services"
+
+    counter
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+
+    iifname "home" ip protocol tcp tcp flags != syn / fin,syn,rst,ack ct state new counter reject with tcp reset
+    meta protocol ip6 iifname "home" tcp flags != syn / fin,syn,rst,ack ct state new counter accept
+    ct state invalid drop
+    ct state { established, related } accept
+    ip protocol icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+    ip6 nexthdr icmpv6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-reply } accept
+
+    meta l4proto { tcp, udp } th dport { 135, 137-139, 445 } oifname { "br0", "mape0" } counter drop
+    iifname "home" oifname { "br0", "mape0" } accept
+
+    counter
+  }
+}
+
+include "/etc/nftables.d/*.nft"
+```
+
+```sh
+systemctl enable --now nftables
+```
+
+***
+
+以上で、基本的なルータとしての機能を実現できた。[最終回・第三部](./bet-all-on-systemd-3)では、HGWをルータの下流に設置し、今回の記事の最終目標を達成する。

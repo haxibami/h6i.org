@@ -1,0 +1,760 @@
+---
+title: "systemdに全部賭けろ（第三部）"
+date: 2025-08-06
+description: "Linuxでルータを作る（ホームゲートウェイ設置編）"
+tags: ["bet-all-on-systemd", "tech", "network", "linux"]
+emoji: "☎️"
+order: 3
+---
+
+***
+
+<details>
+  <summary>記事の構成について</summary>
+
+  最終回・第三部では、ルータの下流にHGWを設置し、ひかり電話を利用するための設定を行う。
+
+  - [第一部：環境構築](./bet-all-on-systemd-1)
+  - [第二部：基本機能構築](./bet-all-on-systemd-2)
+  - [第三部：HGW設置](./bet-all-on-systemd-3) :arrow\_left: 今回
+</details>
+
+***
+
+## 手順3：HGWの設置
+
+### HGW側インターフェースの設定
+
+HGW側インターフェース（`hgw`）の設定はやや複雑だ。[ネットワーク構成](./bet-all-on-systemd-1#ネットワーク構成)からわかる通り、`hgw`は
+
+1. `br0`ブリッジのメンバー
+2. IPv6のデフォルトゲートウェイ
+3. DHCPv6サーバ
+
+の三つの役割をもつ。このうち3. はKeaに任せるが、ブリッジへの追加（1.）と、RAによるデフォルトゲートウェイの通知[^1]（2.）は別途行う必要がある。
+
+[^1]: DHCPv6ではデフォルトゲートウェイを通知できないため
+
+送信するRAの内容は、（HGWが本来受け取る）フレッツ網のものを参考にするとよい。
+
+```console {4-6,10-12}
+> rdisc6 -1 br0
+Soliciting ff02::2 (ff02::2) on br0...
+
+Hop limit                 :           64 (      0x40)
+Stateful address conf.    :          Yes
+Stateful other conf.      :          Yes
+Mobile home agent         :           No
+Router preference         :       medium
+Neighbor discovery proxy  :           No
+Router lifetime           :         1800 (0x00000708) seconds
+Reachable time            :       300000 (0x000493e0) milliseconds
+Retransmit time           :        10000 (0x00002710) milliseconds
+ Source link-layer address: XX:XX:XX:XX:XX:XX
+ MTU                      :         1500 bytes (valid)
+ from fe80::xxxx:xxxx:xxxx:xxxx
+```
+
+これをもとに、以下のように設定する。
+
+```systemd title="/etc/systemd/network/15-hgw.network"
+[Match]
+Name=hgw
+
+[Network]
+Bridge=br0
+LinkLocalAddressing=ipv6
+IPv6StableSecretAddress=xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx
+IPv6Forwarding=yes
+IPv6SendRA=yes
+
+# フレッツ網に似せたRAを射出する
+[IPv6SendRA]
+# M-flag、O-flagを有効にしておく
+Managed=yes
+OtherInformation=yes
+HopLimit=64
+RouterLifetimeSec=1800
+ReachableTimeSec=300
+RetransmitSec=10
+```
+
+### ブリッジの転送ルール設定
+
+続いて、ブリッジ（`br0`）の転送ルールを設定する。ブリッジのフィルタリングには、nftablesの[bridgeファミリー](https://wiki.nftables.org/wiki-nftables/index.php/Bridge_filtering)が便利だ[^2]。
+
+[^2]: これはかつてのebtablesやbr\_netfilterを代替するらしい
+
+```NFTables title="/etc/nftables.d/51-brouter.nft"
+#!/usr/sbin/nft -f
+destroy table bridge brouter
+
+table bridge brouter {
+  chain prerouting {
+    type filter hook prerouting priority -300; policy accept;
+    # IPv6パケットをルーティングに回す
+    iifname hgw ether type ip6 counter meta broute set 1 accept;
+    counter
+  }
+
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+    ct state { established, related } counter accept;
+    # IPv4パケットのブリッジ通過を許可
+    iifname hgw oif wan0 ether type { ip, arp } counter accept;
+    iif wan0 oifname hgw ether type { ip, arp } counter accept;
+    counter
+  }
+}
+```
+
+処理の流れは、[公式ページ](https://wiki.nftables.org/wiki-nftables/index.php/Netfilter_hooks)の図を見ると理解しやすい。とはいえ、インターネット上の設定例も少ないテーマなので、少しだけ補足しておく（誤りがあったら指摘してほしい）。
+
+#### IPv4パケットの流れ
+
+1. `hgw`から入った上りパケットは、（`hgw`が`br0`のメンバーであるため）bridgeレイヤへ向かう
+2. preroutingフックを通過し、forwardフックに入る
+3. forwardフックでIPv4（`ip`/`arp`）パケットのみを明示的に許可しているため、これも通過し、`wan0`からフレッツ網に出ていく
+
+下りについても、インターフェースが逆になるだけで同様となる。
+
+#### IPv6パケットの流れ
+
+1. `hgw`から入った上りパケットは、同じくbridgeレイヤへ向かう
+2. preroutingフックで`meta broute`に`1`がセットされるため、ルーティングに回される
+3. 通常のnftables（IPレイヤ）の処理に入り、`hgw`から来たパケットとして扱われる
+4. IPレイヤのforwardフックで転送が許可されている（[直後](#ファイアウォールの設定更新)で設定する）ため、`br0`からフレッツ網に出ていく
+
+下りは`br0`宛てに入ってくるため、上のルールに干渉せず`hgw`に到達できる（と思われる）[^3]。
+
+[^3]: あまり詳しくは追えていないが、そのような振る舞いをしているように見える
+
+### ファイアウォールの設定更新
+
+HGWからのIPv6パケットを受け付けるよう、ファイアウォールにも設定を加えておく。
+
+<details>
+  <summary>変更点</summary>
+
+  ```diff title="/etc/nftables.conf" lang="NFTables"
+  #!/usr/bin/nft -f
+
+  destroy table inet filter
+
+  table inet filter {
+    # （中略）
+    chain input {
+      type filter hook input priority filter; policy drop;
+
+      ct state invalid drop comment "early drop of invalid connections"
+      ct state { established, related } accept comment "allow tracked connections"
+      iif lo accept comment "allow from loopback"
+      ip6 nexthdr icmpv6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-request, echo-reply } limit rate 5/second burst 10 packets accept
+      ip6 nexthdr icmpv6 ip6 saddr fe80::/10 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, ind-neighbor-solicit, ind-neighbor-advert, 148, 149 } iifname "br0" accept
+  -    ip6 nexthdr icmpv6 icmpv6 type { mld-listener-query, mld-listener-report, mld-listener-done, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, ind-neighbor-solicit, ind-neighbor-advert, mld2-listener-report, 148, 149, 151, 152, 153 } iifname "home" accept
+  +    ip6 nexthdr icmpv6 icmpv6 type { mld-listener-query, mld-listener-report, mld-listener-done, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, ind-neighbor-solicit, ind-neighbor-advert, mld2-listener-report, 148, 149, 151, 152, 153 } iifname { "home", "hgw" } accept
+      ip protocol icmp accept comment "allow icmp"
+      udp dport bootps ip saddr 0.0.0.0 ip daddr 255.255.255.255 iifname "home" accept comment "allow dhcpv4"
+  -    udp dport dhcpv6-server ip6 saddr fe80::/10 ip6 daddr ff02::1:2 iifname "home" accept comment "allow dhcpv6"
+  +    udp dport dhcpv6-server ip6 saddr fe80::/10 ip6 daddr ff02::1:2 iifname { "home", "hgw" } accept comment "allow dhcpv6"
+      udp dport dhcpv6-client iifname "br0" accept
+      ip saddr @LANv4 jump lan_input comment "allow private services"
+      ip6 saddr @LANv6 iifname "home" jump lan_input comment "allow private services"
+
+      counter
+    }
+
+    chain forward {
+      type filter hook forward priority filter; policy drop;
+
+      iifname "home" ip protocol tcp tcp flags != syn / fin,syn,rst,ack ct state new counter reject with tcp reset
+  -    meta protocol ip6 iifname "home" tcp flags != syn / fin,syn,rst,ack ct state new counter accept
+  +    meta protocol ip6 iifname { "home", "hgw" } tcp flags != syn / fin,syn,rst,ack ct state new counter accept
+      ct state invalid drop
+      ct state { established, related } accept
+      ip protocol icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+      ip6 nexthdr icmpv6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-reply } accept
+
+      meta l4proto { tcp, udp } th dport { 135, 137-139, 445 } oifname { "br0", "mape0" } counter drop
+      iifname "home" oifname { "br0", "mape0" } accept
+  +    iifname "hgw" oifname "br0" accept
+
+      counter
+    }
+  }
+
+  include "/etc/nftables.d/*.nft"
+  ```
+</details>
+
+### DHCPv6サーバの設定
+
+DHCPv6サーバ（Kea）は、以下の最低限の設定で動作させる。
+
+```jsonc title="/etc/kea/kea-dhcp6.conf" {30-37}
+{
+  "Dhcp6": {
+    "interfaces-config": {
+      "interfaces": [
+        "hgw"
+      ]
+    },
+    "control-socket": {
+      "socket-type": "unix",
+      "socket-name": "kea6-ctrl-socket"
+    },
+    "lease-database": {
+      "type": "memfile",
+      "lfc-interval": 3600
+    },
+    "expired-leases-processing": {
+      "reclaim-timer-wait-time": 10,
+      "flush-reclaimed-timer-wait-time": 25,
+      "hold-reclaimed-time": 3600,
+      "max-reclaim-leases": 100,
+      "max-reclaim-time": 250,
+      "unwarned-reclaim-cycles": 5
+    },
+    // フレッツ網を模倣
+    "renew-timer": 7200,
+    "rebind-timer": 10800,
+    "preferred-lifetime": 12600,
+    "valid-lifetime": 14400,
+    "hooks-libraries": [
+      // DHCPリースの変動時にスクリプトを実行するフック
+      {
+        "library": "/usr/lib/kea/hooks/libdhcp_run_script.so",
+        "parameters": {
+          "name": "/usr/share/kea/scripts/pd-route.sh",
+          "sync": false
+        }
+      }
+    ],
+    "subnet6": [],
+    "loggers": [
+      {
+        "name": "kea-dhcp6",
+        "output-options": [
+          {
+            "output": "kea-dhcp6.log"
+          }
+        ],
+        "severity": "INFO",
+        "debuglevel": 0
+      }
+    ]
+  }
+}
+```
+
+払い出すIPv6プレフィックスや、DHCPv6オプションの内容を書く必要はない。[あとで書く処理](#ひかり電話関連情報の配布)で動的に追加するからだ。
+
+ただし、HGWにプレフィックスを払い出す際、払い出したプレフィックスへの経路を設定する必要がある（逆にリース失効時は経路を削除する必要がある）。このため[フック](https://kea.readthedocs.io/en/stable/arm/hooks.html#libdhcp-run-script-so-run-script-support-for-external-hook-scripts)を使い、払い出し・失効などのタイミングで以下のスクリプトを実行している。
+
+```sh title="/usr/share/kea/scripts/pd-route.sh"
+#!/bin/sh
+PROTO=static
+
+remove_ipv6_routes() {
+  if [ "$LEASE6_TYPE" = "IA_PD" ]; then
+    ip -6 route delete "${LEASE6_ADDRESS}/${LEASE6_PREFIX_LEN}" proto "${PROTO}"
+  fi
+}
+
+on_commit() {
+  if [ "$LEASES6_SIZE" -gt 0 ]; then
+    if [ "$LEASES6_AT0_TYPE" = "IA_PD" ]; then
+      ip -6 route replace "${LEASES6_AT0_ADDRESS}/${LEASES6_AT0_PREFIX_LEN}" via "${QUERY6_REMOTE_ADDR}" dev "${QUERY6_IFACE_NAME}" proto "${PROTO}"
+    fi
+  fi
+}
+
+case "$1" in
+"lease6_release" | "lease6_expire")
+  remove_ipv6_routes
+  ;;
+"leases6_committed")
+  on_commit
+  ;;
+esac
+```
+
+```sh
+systemctl enable --now kea-dhcp6
+```
+
+また、KeaのHTTP APIも有効化しておく。
+
+```jsonc title="/etc/kea/kea-ctrl-agent.conf"
+{
+  "Control-agent": {
+    "http-host": "127.0.0.1",
+    "http-port": 8000,
+    "control-sockets": {
+      "dhcp4": {
+        "socket-type": "unix",
+        "socket-name": "kea4-ctrl-socket"
+      },
+      "dhcp6": {
+        "socket-type": "unix",
+        "socket-name": "kea6-ctrl-socket"
+      },
+      "d2": {
+        "socket-type": "unix",
+        "socket-name": "kea-ddns-ctrl-socket"
+      }
+    },
+    "hooks-libraries": [],
+    "loggers": [
+      {
+        "name": "kea-ctrl-agent",
+        "output-options": [
+          {
+            "output": "kea-ctrl-agent.log"
+          }
+        ],
+        "severity": "INFO",
+        "debuglevel": 0
+      }
+    ]
+  }
+}
+```
+
+```sh
+systemctl enable --now kea-ctrl-agent
+```
+
+### ひかり電話関連情報の受信
+
+[第二部](./bet-all-on-systemd-2#ipv6-ipoe)のように、ただDHCPv6クライアントを動かしただけでは、ひかり電話の関連情報は降ってこない。やや天下り的だが、実はDHCPv6リクエストで
+
+- Option 17, 22, 23, 24, 31を要求し
+- Option 16に適切な値を含める
+
+ことで、必要な情報を受信できる。このことは、NTTの[技術参考資料](https://flets.com/pdf/ip-int-3.pdf)[^4]にほのめかされている。
+
+[^4]: 「IP通信網サービスのインタフェース」第三分冊（第45版）、2025年8月1日最終閲覧
+
+リンク先資料の「フレッツ 光ネクスト編」を見てみると、2.4.2.1.5「DHCPv6オプション」に以下のように書かれている。
+
+> Option Request に指定可能なオプション番号は、”17”,”22”,”23”,”24”,”31”です
+
+そして2.4.2.1.6「端末設定自動化のためのネットワーク関連情報通知機能」にはこうある。
+
+> 端末への設定自動化のためのネットワーク関連情報通知機能を取得する場合は、端末からの要求メッセージにて、Option Requestオプション（6）にオプション17を含め、Vendor Classオプション(16)に必要な情報（端末情報）を設定し、網に送信します
+
+何やらわかりにくい書き方だが、これはおそらくひかり電話関連情報の取得を指している。そしてVendor Classオプションの値については、
+
+> ネットワーク関連情報を設定する端末のハードウェアアドレス（MACアドレス）を設定
+
+とあり、HGWのMACアドレスを含めればよいことがわかる[^5]。
+
+[^5]: 実際、HGWが送っているDHCPv6リクエストをキャプチャしてみると、この通りになっている。というより本来は順序が逆で、先にキャプチャをしたことで技術資料の意味が明らかになったのだが、その点は置いておく
+
+これを踏まえ、DHCPv6クライアントの設定を追記する。
+
+```diff lang="systemd" title="/etc/systemd/network/05-br0.network"
+# ...
+[DHCPv6]
+DUIDType=link-layer
+IAID=0
+SendHostname=no
+UseCaptivePortal=no
+UseDNR=no
++# これがなければsystemd-networkdはOption 24を無視する
++UseDomains=yes
++RequestOptions=17 22 23 24 31
++# 一見文字列しかダメそうだが、実はhexも送れる
++VendorClass=\xde\xad\xbe\xef\x00\x05
+# ...
+```
+
+HGWのMACアドレス（`de:ad:be:ef:00:05`と仮定）は、ルータで
+
+```console
+> ip -6 neigh show dev hgw | awk '{print $3}'
+(中略)
+de:ad:be:ef:00:05
+```
+
+などとするか、HGWのWeb設定画面[^6]から確認する。
+
+[^6]: 手元のHGW（RX-600KI）の場合、「情報 > 現在の状態」から確認できた
+
+設定を再読み込みし、D-Busを叩くと、
+
+```sh
+networkctl reload
+busctl -j call org.freedesktop.network1 /org/freedesktop/network1 org.freedesktop.network1.Manager Describe | jq '.data[0] | fromjson | .Interfaces[] | select(.DHCPv6Client) | .DHCPv6Client.VendorSpecificOptions'
+```
+
+ひかり電話関連情報が得られるはずだ。
+
+```json
+[
+  {
+    "EnterpriseId": 210,
+    "SubOptionCode": 202,
+    "SubOptionData": "XXXXXXXXXX"
+  },
+  {
+    "EnterpriseId": 210,
+    "SubOptionCode": 204,
+    "SubOptionData": "XXXXXXXXXX"
+  },
+  {
+    "EnterpriseId": 210,
+    "SubOptionCode": 201,
+    "SubOptionData": "deadbeef0005"
+  },
+  {
+    "EnterpriseId": 210,
+    "SubOptionCode": 210,
+    "SubOptionData": "XXXXXXXXXX"
+  }
+]
+```
+
+それぞれの設定（201, 202, 204, 210）の意味は以下のサイトなどを見るとわかる。
+
+[https://blog.goo.ne.jp/rabbit5151/e/be9ef5793b083e699167fcd71cbde499](https://blog.goo.ne.jp/rabbit5151/e/be9ef5793b083e699167fcd71cbde499)
+
+### ひかり電話関連情報の配布
+
+最後に、DHCPv6のリースを検知して、Keaの設定を更新する処理を書く。
+
+設定はKeaを再起動すると吹き飛んでしまうため、DHCPv6のリース時だけでなく、Kea自体の再起動の際にも更新処理が走るようにしている。
+
+<details>
+  <summary>スクリプト（長いので注意）</summary>
+
+  ```python title="/usr/local/bin/networkd-kea6-relay"
+  #!/usr/bin/env python
+
+  from asyncio import Event, create_task, run
+  from ipaddress import IPv6Address
+  from json import loads
+  from time import sleep
+  from typing import TypedDict
+
+  from requests import exceptions, post
+  from sdbus import (
+      DbusInterfaceCommonAsync,
+      dbus_method_async,
+      dbus_signal_async,
+      sd_bus_open_system,
+      set_default_bus,
+  )
+
+  SYSTEMD_IF = "org.freedesktop.systemd1"
+  SYSTEMD_NODE_PATH = "/org/freedesktop/systemd1"
+  SYSTEMD_MGR_IF = "org.freedesktop.systemd1.Manager"
+
+  NETWORKD_IF = "org.freedesktop.network1"
+  NETWORKD_NODE_PATH = "/org/freedesktop/network1"
+  NETWORKD_MGR_IF = "org.freedesktop.network1.Manager"
+  NETWORKD_LINK_IF = "org.freedesktop.network1.Link"
+  NETWORKD_DHCP6C_IF = "org.freedesktop.network1.DHCPv6Client"
+
+  DHCP6C_ETH = "br0"
+  HGW_ETH = "hgw"
+
+  KEA_API = "http://127.0.0.1:8000"
+  KEA_SERVICE = "kea-dhcp6.service"
+  KEA_MAX_RETRIES = 10
+  KEA_RETRY_DELAY = 5
+
+  # SIPサーバをD-Busで取得するにはsystemd v258が必要。それまではハードコードしておく
+  SIP_SERVERS = ["YOUR_SIP_SERVER_ADDR"]
+
+
+  class Networkd(DbusInterfaceCommonAsync, interface_name=NETWORKD_MGR_IF):
+      def __init__(self) -> None:
+          super().__init__()
+          self._proxify(NETWORKD_IF, NETWORKD_NODE_PATH)
+
+      @dbus_method_async("s", "io")
+      async def get_link_by_name(self, name: str) -> tuple[int, str]:
+          raise NotImplementedError
+
+
+  class NetworkdLink(DbusInterfaceCommonAsync, interface_name=NETWORKD_LINK_IF):
+      def __init__(self, object_path: str) -> None:
+          super().__init__()
+          self._proxify(NETWORKD_IF, object_path)
+
+      @dbus_method_async(result_signature="s")
+      async def describe(self) -> str:
+          raise NotImplementedError
+
+
+  class Systemd(DbusInterfaceCommonAsync, interface_name=SYSTEMD_MGR_IF):
+      def __init__(self, object_path: str) -> None:
+          super().__init__()
+          self._proxify(SYSTEMD_IF, SYSTEMD_NODE_PATH)
+
+      @dbus_signal_async(signal_signature="uoss")
+      def job_removed(self) -> tuple[int, str, str, str]:
+          raise NotImplementedError
+
+
+  class VendorSpecificOption(TypedDict):
+      EnterpriseId: int
+      SubOptionCode: int
+      SubOptionData: str
+
+
+  class Dhcp6(TypedDict):
+      prefix: IPv6Address
+      dns: str
+      ntp: str
+      sip: str
+      domains: str
+      opts: list[VendorSpecificOption]
+
+
+  class Dhcp6State:
+      def __init__(self):
+          self.state: Dhcp6 | None = None
+
+      def get(self) -> Dhcp6 | None:
+          return self.state
+
+      async def set(self, linkpath: str):
+          dhcp6 = loads(await NetworkdLink(linkpath).describe())
+          dns, ntp, sip = [
+              ", ".join([IPv6Address(bytes(e["Address"])).compressed for e in dhcp6[k]])
+              for k in ["DNS", "NTP"]
+          ] + SIP_SERVERS
+          # dns, ntp, sip = [
+          #     ", ".join([IPv6Address(bytes(e["Address"])).compressed for e in dhcp6[k]])
+          #     for k in ["DNS", "NTP", "SIP"]
+          # ]
+          self.state = {
+              "prefix": IPv6Address(bytes(dhcp6["DHCPv6Client"]["Prefixes"][0]["Prefix"])),
+              "dns": dns,
+              "ntp": ntp,
+              "sip": sip,
+              "domains": ", ".join([f"{e['Domain']}." for e in dhcp6["SearchDomains"]]),
+              "opts": dhcp6["DHCPv6Client"]["VendorSpecificOptions"],
+          }
+
+          return self.state
+
+
+  def update_kea_config(dhcp6: Dhcp6):
+      def cmd(cmd: str, config: dict[str, str] | None):
+          return post(
+              KEA_API,
+              json={"command": cmd, "service": ["dhcp6"], "arguments": {"Dhcp6": config}},
+              timeout=3,
+          )
+
+      def get_config():
+          for i in range(KEA_MAX_RETRIES):
+              try:
+                  resp = cmd("config-get", None)
+                  json = resp.json()[0]
+                  if resp.status_code == 200 and json["result"] == 0:
+                      return resp.json()[0]["arguments"]["Dhcp6"]
+                  else:
+                      raise exceptions.ConnectionError
+              except exceptions.ConnectionError:
+                  print(
+                      f"Kea API not reachable, retrying in {KEA_RETRY_DELAY} seconds... ({i + 1}/{KEA_MAX_RETRIES})"
+                  )
+                  sleep(KEA_RETRY_DELAY)
+          print("Kea API is not reachable after maximum retries.")
+          return None
+
+      config = get_config()
+
+      if config is None:
+          return
+
+      config["subnet6"] = [
+          {
+              "id": 1,
+              "subnet": f"{dhcp6['prefix'] + (0xEF << 64)}/64",
+              "interface": HGW_ETH,
+              "pools": [{"pool": f"{dhcp6['prefix'] + (0xEF << 64)}/64"}],
+              "pd-pools": [
+                  {
+                      "prefix": f"{dhcp6['prefix'] + (0xF0 << 64)}",
+                      "prefix-len": 60,
+                      "delegated-len": 60,
+                  }
+              ],
+          }
+      ]
+
+      config["option-def"] = [
+          {
+              "name": f"ntt-{opt['SubOptionCode']}",
+              "code": opt["SubOptionCode"],
+              "type": "binary",
+              "space": f"vendor-{opt['EnterpriseId']}",
+          }
+          for opt in dhcp6["opts"]
+      ]
+
+      config["option-data"] = [
+          {
+              "code": opt["SubOptionCode"],
+              "always-send": True,
+              "space": f"vendor-{opt['EnterpriseId']}",
+              "csv-format": False,
+              "data": opt["SubOptionData"],
+          }
+          for opt in dhcp6["opts"]
+      ] + [
+          {
+              "name": "vendor-opts",
+              "data": f"{dhcp6['opts'][0]['EnterpriseId']}",
+          },
+          {"name": "sip-server-addr", "data": dhcp6["sip"]},
+          {"name": "dns-servers", "data": dhcp6["dns"]},
+          {"name": "domain-search", "data": dhcp6["domains"]},
+          {"name": "sntp-servers", "data": dhcp6["ntp"]},
+      ]
+
+      test_config = cmd("config-test", config).json()[0]
+
+      print(f"Kea: {test_config['text']}")
+
+      if test_config["result"] != 0:
+          return
+
+      set_config = cmd("config-set", config).json()[0]
+
+      if set_config["result"] != 0:
+          print(f"Error: {set_config['text']}")
+          return
+
+      print(f"Kea: {set_config['text']} Hash: {set_config['arguments']['hash']}")
+
+
+  async def observe_dhcp6_lease(dhcp6_state: Dhcp6State):
+      async for linkpath, (
+          iface,
+          props,
+          _,
+      ) in DbusInterfaceCommonAsync.properties_changed.catch_anywhere(NETWORKD_IF):
+          if iface != NETWORKD_DHCP6C_IF or props["State"][1] != "bound":
+              continue
+
+          print(f"DHCPv6 lease acquired on {linkpath}, updating Kea configuration...")
+
+          dhcp6 = await dhcp6_state.set(linkpath)
+          update_kea_config(dhcp6)
+
+
+  async def observe_kea_restart(dhcp6_state: Dhcp6State):
+      async for _, (
+          _,
+          _,
+          service,
+          signal,
+      ) in Systemd.job_removed.catch_anywhere(SYSTEMD_IF):
+          if service != KEA_SERVICE or signal != "done":
+              continue
+
+          print(f"{KEA_SERVICE} restarted, updating Kea configuration...")
+
+          dhcp6 = dhcp6_state.get()
+
+          if dhcp6 is None:
+              print("No DHCPv6 state available, fetching from Networkd...")
+              _, linkpath = await Networkd().get_link_by_name(DHCP6C_ETH)
+              print(f"Link path: {linkpath}")
+              dhcp6 = await dhcp6_state.set(linkpath)
+
+          update_kea_config(dhcp6)
+
+
+  async def main():
+      set_default_bus(sd_bus_open_system())
+
+      print("Start DHCPv6 proxying...")
+
+      dhcp6_state_manager = Dhcp6State()
+
+      task1 = create_task(observe_dhcp6_lease(dhcp6_state_manager))
+      task2 = create_task(observe_kea_restart(dhcp6_state_manager))
+
+      await task1
+      await task2
+
+      _ = await Event().wait()
+
+
+  if __name__ == "__main__":
+      try:
+          run(main())
+      except KeyboardInterrupt:
+          print("\nExiting...")
+      except Exception as e:
+          print(f"Error: {e}")
+  ```
+</details>
+
+スクリプト内にも書いたが、執筆時点でstable版のsystemd（v257）では、IPv6のSIPサーバアドレスを取得できない[^7]。v258のリリースを待つか、手動でキャプチャ[^8]した結果をハードコードするほかない。
+
+[^7]: 仕方がないので[コントリビュートした](https://github.com/systemd/systemd/pull/38269)
+
+[^8]: `tshark -i br0 -f "udp src port 547" -Y "dhcpv6.msgtype == 7 and dhcpv6.sip_server_a" -T ek -e dhcpv6.sip_server_a`
+
+あとはこのスクリプトをsystemdサービスで実行すれば完成だ。
+
+```systemd title="/etc/systemd/system/networkd-kea6-relay.service"
+[Unit]
+Description=Networkd DHCPv6 lease info relay for Kea
+After=network.target sys-subsystem-net-devices-br0.device
+BindsTo=sys-subsystem-net-devices-br0.device
+
+[Service]
+ExecStart=/usr/local/bin/networkd-kea6-relay
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+systemctl enable --now networkd-kea6-relay
+```
+
+## 動作検証
+
+### IPv6 IPoE
+
+VDSL回線（\< 100Mbps）であるため、速度には期待していないが、それでも常時90Mbps程度は出ている。HGWを上流に置いていた際には時折パケットが詰まるような感じがあったが、それがなくなった。
+
+主要なCDNへのpingは数ms程度で通っており、遅延も問題ないと思われる。HGWを上流に置く場合より、心なしか（1-2ms程度）速くなっているかもしれない。
+
+### IPv4 over IPv6
+
+速度・遅延についてはIPv6 IPoEと同様で、とくにオーバーヘッドはない。`tc`を使ったポートを振り分けも問題なく動作しており、（いわゆる）ニチバンベンチも快適にクリアできる。
+
+### HGW・ひかり電話
+
+HGWのWeb設定画面から、DHCPの取得や、ファームウェアの更新チェックが行えることを確認した。また、下流のアナログ電話機からの発着信（ナンバーディスプレイあり）も問題なく行えた。
+
+### ハードウェアの状態
+
+ルータのCPU使用率はめったに10%を越えない。電力設定を控えめにしていることもあり、温度もそこまで高くはない（耳を近づけると、ファンが回るかすかな音は聞こえる）。
+
+## 今後の課題
+
+- IPv6プレフィックス変更への対応
+  - ごくまれに工事などで変更される場合があるらしい
+  - ルール計算を自動化すれば問題ない？
+- VDSLをやめたい
+  - 集合住宅を脱出、もしくは爆破
+
+## まとめ
+
+みなさんも夏休みの自由研究として、ルータを自作するとよいだろう :star\_struck:

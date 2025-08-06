@@ -1,44 +1,51 @@
-import { fromHtml } from "hast-util-from-html";
-import { toHtml } from "hast-util-to-html";
-import { SKIP, visit } from "unist-util-visit";
-import { budouxProcess } from "./budoux";
+import type { HTMLProcessingParser } from "budoux";
+import { loadDefaultJapaneseParser } from "budoux";
+import type { Root } from "hast";
+import { h } from "hastscript";
+import { visit } from "unist-util-visit";
 
-import type { Element, ElementContent, Root } from "hast";
-
-const defaultTargetTagNames = ["p", "li", "h1", "h2", "h3", "h4", "h5", "h6"];
-
-function isElement(node: Element | ElementContent): node is Element {
-  return node.type === "element";
-}
-
-function isTargetNode(
-  node: Element | ElementContent,
-  targetTagNames: string[],
-): node is Element {
-  return isElement(node) ? targetTagNames.includes(node.tagName) : false;
-}
+const defaultExcludeTagNames: string[] = ["pre", "code"];
 
 interface Options {
   /**
-   * The list of tag names to be processed by Budoux.
-   * @default ["p", "li", "h1", "h2", "h3", "h4", "h5", "h6"]
+   * The list of tag names to exclude from processing.
+   * @default ["pre", "code"]
    */
-  targetTagNames?: string[];
+  excludeTagNames?: string[];
 }
 
+let parser: HTMLProcessingParser | null = null;
+
 const rehypeBudoux = ({
-  targetTagNames = defaultTargetTagNames,
+  excludeTagNames = defaultExcludeTagNames,
 }: Options = {}) => {
   return (tree: Root) => {
-    visit(tree, "element", (node, index, parent) => {
-      if (typeof index !== "number" || !isTargetNode(node, targetTagNames)) {
+    visit(tree, "text", (node, index, parent) => {
+      if (
+        index === undefined ||
+        !parent ||
+        node.value.trim().length <= 0 ||
+        parent.type !== "element" ||
+        excludeTagNames.includes(parent.tagName)
+      ) {
         return;
       }
-      const newNode = fromHtml(budouxProcess(toHtml(node)), {
-        fragment: true,
-      }).children[0];
-      newNode && parent?.children.splice(index, 1, newNode);
-      return SKIP;
+      if (!parser) {
+        parser = loadDefaultJapaneseParser();
+      }
+      const parsed = parser
+        .parse(node.value)
+        .flatMap((value, i) => [
+          ...(i > 0 ? [h("wbr")] : []),
+          { type: "text" as const, value },
+        ]);
+      parent.children.splice(index, 1, ...parsed);
+      if (parsed.length > 1) {
+        parent.properties = {
+          ...parent.properties,
+          dataBudoux: true,
+        };
+      }
     });
   };
 };

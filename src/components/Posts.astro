@@ -39,12 +39,12 @@ const { page } = Astro.props;
                   </time>
                 )}
               </span>
-              <Budoux>
-                <h3>{data.title}</h3>
-              </Budoux>
-              <Budoux>
-                <span class="description">{data?.description}</span>
-              </Budoux>
+              <h3 data-budoux>
+                <Budoux text={data.title} />
+              </h3>
+              <span class="description" data-budoux>
+                <Budoux text={data.description} />
+              </span>
             </a>
             <span>
               <Tags tags={data.tags} collectionKey={collection} />
