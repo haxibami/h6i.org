@@ -99,7 +99,7 @@ order: 1
 
 [^3]: 詳しくは第三部で述べるが、DHCPv6リクエストに適切なオプション（Option 16, Vendor Class）を含めれば、ルータで直接ひかり電話関連情報を受信できる。しかしこれに対応した市販ルータは（おそらく）少ないし、よしんば受信できたとして、その情報を下流に送信できるとは思えない
 
-しかしLinuxでルータを作れば、これらすべての機能──IPv4のブリッジ、DHCPv6サーバ、DHCPv6オプションの受信──を一台で担える。そのうえ適当な端末（たとえば1-3万円程度のミニPC）さえあれば済む。ちょっとしたDIYで、シンプルかつ多機能な構成を実現できるのだ。
+しかしLinuxでルータを作れば、これらすべての機能──IPv4のブリッジ、DHCPv6サーバ、DHCPv6オプションの受信──を一台で担える。そのうえ適当な端末（たとえばミニPC）さえあれば済む。ちょっとしたDIYで、シンプルかつ多機能な構成を実現できるのだ。
 
 ## 環境
 
@@ -135,16 +135,14 @@ IPv4 over IPv6の接続に必要な情報は、あらかじめプロバイダか
 
 | 項目      | 機種                                                                                                 | 用途・備考                                                                                      |
 | :------ | :------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------- |
-| ミニPC    | GMKtec [NucBox M6](https://www.gmktec.com/products/amd-ryzen-5-6600h-mini-pc-nucbox-m6)            | ルータ用。LANポートが二つ以上あればよい[^5]。UEFIで電力モードを"Quiet"にしている                                          |
+| ミニPC    | （某社のミニPC）                                                                                          | ルータ用。LANポートが二つ以上あればよい[^5]。                                                                 |
 | L2スイッチ  | TP-Link [TL-SG105PE](https://www.tp-link.com/jp/business-networking/easy-smart-switch/tl-sg105pe/) | ポート数を増やすために必要。タグVLAN（802.1Q）が切れればよい                                                        |
 | HGW     | 沖電気 [RX-600KI](https://web116.jp/shop/hikari_r/600ki/600ki_00.html)                                | ひかり電話ルータ                                                                                   |
 | VDSLモデム | 住友電工 VH100-4ES                                                                                     | [FTTH](https://ja.wikipedia.org/wiki/FTTH)回線であれば、単独型ONU、もしくは「UNI出し」したHGWの下半分（ONU部分）がこれにあたる |
 
 [^5]: VLANを駆使すれば、ポートが一つでもなんとかなるかもしれない
 
-ルータ用には、AliExpressで拾った適当なミニPC[^6]を使った。ミニPCだけではポート数が足りないため、別途タグVLAN対応のL2スイッチも用意した。
-
-[^6]: なんと**Ryzen 5 6600H**（6C12T）と**16GB**のDDR5が載っている。本来はもっと省電力な機種を使うべきだ
+ルータ用には、適当なミニPCを使った。ミニPCだけではポート数が足りないため、別途タグVLAN対応のL2スイッチも用意した。
 
 ## ネットワーク設計
 
@@ -167,9 +165,9 @@ IPv4 over IPv6の接続に必要な情報は、あらかじめプロバイダか
 
 ### DHCPv6クライアントを動かすインターフェースについて
 
-ルータのWAN側インターフェースは、その性質上、フレッツ網とHGWを繋ぐブリッジのメンバーになる。このため、当該インターフェースではDHCPv6クライアントを動かすことができない。代わりに、ブリッジデバイスでDHCPv6クライアントを動作させる[^7]。
+ルータのWAN側インターフェースは、その性質上、フレッツ網とHGWを繋ぐブリッジのメンバーになる。このため、当該インターフェースではDHCPv6クライアントを動かすことができない。代わりに、ブリッジデバイスでDHCPv6クライアントを動作させる[^6]。
 
-[^7]: MACVLANでWAN側インターフェースを二つの仮想インターフェースに分割し、片方をブリッジに組み込む構成も試したが、うまく機能しなかった（下りのパケットを適切に処理できなかった）
+[^6]: MACVLANでWAN側インターフェースを二つの仮想インターフェースに分割し、片方をブリッジに組み込む構成も試したが、うまく機能しなかった（下りのパケットを適切に処理できなかった）
 
 ### IPv4 over IPv6のポート振り分けについて
 
@@ -185,9 +183,9 @@ IPv4 over IPv6（MAP-E）に関しては、以下の記事が注目に値する�
 
 理想としては、フレッツ網から受け取ったDHCPv6オプションを、そのままHGWに「中継」できればよいが、あいにくそうはいかない。代わりに、**DHCPv6のリースを受けるたびに、リース内容をもとにDHCPv6サーバの設定を更新する**仕組みを作る。
 
-鍵となるのは、systemd-networkdの[D-Bus API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.network1.html)と、Kea（DHCPv6サーバ）の[Management API](https://kea.readthedocs.io/en/stable/arm/ctrl-channel.html)だ。systemd-networkdは、リースを受けるたびにD-Busシグナルを飛ばしてくれるうえ、リースの内容自体もD-Busで取得できる。一方、KeaのManagement APIを使うと、HTTPで動的に設定を投入できる。両者を合わせると[^8]、以下のような処理が可能になる。
+鍵となるのは、systemd-networkdの[D-Bus API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.network1.html)と、Kea（DHCPv6サーバ）の[Management API](https://kea.readthedocs.io/en/stable/arm/ctrl-channel.html)だ。systemd-networkdは、リースを受けるたびにD-Busシグナルを飛ばしてくれるうえ、リースの内容自体もD-Busで取得できる。一方、KeaのManagement APIを使うと、HTTPで動的に設定を投入できる。両者を合わせると[^7]、以下のような処理が可能になる。
 
-[^8]: systemd-networkdには[DHCPv6サーバ機能がない](https://github.com/systemd/systemd/issues/16039)ため、併用が必要
+[^7]: systemd-networkdには[DHCPv6サーバ機能がない](https://github.com/systemd/systemd/issues/16039)ため、併用が必要
 
 1. DHCPv6リースを受けた際のD-Busシグナルを検知
 2. D-Busを叩き、リース情報を取得
@@ -441,9 +439,9 @@ HGW -- 電話機: 電話線 {style.stroke: gray}
 - `hgw@lan0`：VLAN用サブインターフェース（ID = 100）
   - HGW側セグメントのデフォルトゲートウェイ（IPv6のみ）
 
-L2スイッチ側でも、サブインターフェースに対応したタグVLAN（ID = 10, 100）を設定する[^9]。
+L2スイッチ側でも、サブインターフェースに対応したタグVLAN（ID = 10, 100）を設定する[^8]。
 
-[^9]: なお、もう一つVLANを切ってHGWのLAN側と接続しておくと、ルータ経由でHGWのWeb設定画面にアクセスできて便利だが、今回は省略した
+[^8]: なお、もう一つVLANを切ってHGWのLAN側と接続しておくと、ルータ経由でHGWのWeb設定画面にアクセスできて便利だが、今回は省略した
 
 ## 手順1：環境構築
 
@@ -472,9 +470,9 @@ paru -S python-sdbus
 
 そこで製造元から配られている専用ドライバをインストールする。Arch Linuxの場合、[AURにあるパッケージ](https://aur.archlinux.org/packages/r8125-dkms)を使うと楽だ。
 
-デフォルトのMakefileはかなり保守的になっていて、たとえばマルチキューなどの機能が有効化されていない。そのため、適宜書き換えてビルドする[^10]。
+デフォルトのMakefileはかなり保守的になっていて、たとえばマルチキューなどの機能が有効化されていない。そのため、適宜書き換えてビルドする[^9]。
 
-[^10]: OpenWrtでは[デフォルトでマルチキューが有効化されている](https://github.com/openwrt/openwrt/pull/18573)ため、それに倣った
+[^9]: OpenWrtでは[デフォルトでマルチキューが有効化されている](https://github.com/openwrt/openwrt/pull/18573)ため、それに倣った
 
 ```diff title="r8125-rss-dkms/PKGBUILD" lang="sh"
 # （前略）
