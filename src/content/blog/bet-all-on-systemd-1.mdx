@@ -1,6 +1,7 @@
 ---
 title: "systemdに全部賭けろ（第一部）"
 date: 2025-08-06
+lastmod: 2025-08-23
 description: "Linuxでルータを作る（フレッツ光 + v6プラス、下流にホームゲートウェイあり）"
 tags: ["bet-all-on-systemd", "tech", "network", "linux"]
 emoji: "⚡"
@@ -40,16 +41,16 @@ order: 1
 
 ## 背景
 
-とはいえ、なぜそもそもこんな手間をかけるのか、背景を補足しておこう。
+とはいえ、なぜそもそもこんな手間が必要なのだろうか？　背景を補足しておこう。
 
 ### なぜ自前ルータ？
 
-すでにあちこちで書かれているように、フレッツ光の回線に[ひかり電話オプション](https://flets.com/hikaridenwa/)が付くと、**/56**のIPv6プレフィックスが払い出される。このとき同時に貸し出されるHGWの挙動は以下のようになっている。
+すでにあちこちで書かれているように、フレッツ光の回線に[ひかり電話オプション](https://flets.com/hikaridenwa/)が付くと、**/56**のIPv6プレフィックスが払い出される。このとき、同時に貸し出されるHGWは以下のような挙動をする。
 
-- HGWをルータとして使う場合：/56のうち、**/64**のプレフィックスがSLAACで利用される
+- HGWをルータとして使う場合：/56のうち、**/64**のプレフィックスがSLAACで配られる
 - HGWの下流に自前ルータを置く場合：/56のうち、**/60**のプレフィックスがDHCPv6-PDで自前ルータに払い出される
 
-つまり残念なことに、与えられたアドレス空間の$1/256$ないし$1/16$しか有効に利用されない[^1]。
+つまり残念なことに、与えられたアドレス空間の$1/256$ないし$1/16$しか有効に使われない[^1]。
 
 [^1]: もちろん、これでもアドレス数は十分なのだが、せっかく与えられたものが無駄になるのは気に入らない
 
@@ -57,16 +58,16 @@ order: 1
 
 ### なぜLinux？
 
-ところがひかり電話を使う場合、基本的にHGWを最も上流に置かなければならない。というのも、HGWがひかり電話ルータとして機能するには、以下の二つが必要だからだ。
+ところがひかり電話を使う場合、何も考えずHGWを取り外すことはできない。というのも、HGWはひかり電話ルータでもあり、まともに機能するには以下の二つが必要だからだ。
 
 - DHCPv4でフレッツ網から**グローバルIPv4アドレス**（/30）を受け取ること
 - DHCPv6オプション（**ひかり電話関連情報**）を受け取ること
 
-この制約に対し、二つほど解決策が知られている。
+この制約に対し、二つほど解決策がある。
 
 #### 方法1: 選手交代
 
-一つ目の方法は、HGWが嫌なら、そもそも自前の市販ルータで置き換えてしまえ、というものだ。これは[NTTお墨付き](https://flets.com/hikaridenwa/use/uniport.html)の方法だが、デメリットもいくつかある。
+一つ目は、単純に自前の市販ルータでHGWを置き換えてしまえ、というものだ。これは[NTTお墨付き](https://flets.com/hikaridenwa/use/uniport.html)の方法だが、いくつかデメリットもある。
 
 1. ひかり電話対応ルータしか使えない
    - NVR500、NVR510、NVR700Wなど
@@ -76,34 +77,35 @@ order: 1
 
 #### 方法2: IPv4ブリッジ
 
-もうひとつの方法は、IPv4を**選択的にブリッジする**ことだ。これについては下の記事が詳しい。
+もうひとつは、IPv4を**選択的にブリッジする**という方法だ。これについては下の記事が詳しい。
 
 [https://qiita.com/takonasu/items/7a6cc05e4037dfb4d1a1](https://qiita.com/takonasu/items/7a6cc05e4037dfb4d1a1)
 
-ざっくりいえば、ルータの配下にHGWを置き、
+ざっくりいえば、`フレッツ網-ルータ-HGW`のように接続し、ルータで
 
-- フレッツ網-HGW間のIPv4をブリッジし
-- 同じくIPv6はルーティングし
-- ひかり電話関連情報は**別途**手に入れて、HGWに配る
+- HGW発着の
+  - IPv4をブリッジし
+  - IPv6をルーティングし
+- ひかり電話関連情報を**別途**手に入れて、HGWに配る
 
 という構成である。これはかなりうまく動く一方で、まだ以下の難点を残している。
 
 1. IPv4ブリッジに対応したルータしか使えない[^2]
-   - UNIVERGE IXシリーズなど
+   - e.g. UNIVERGE IXシリーズ
 2. 別途DHCPv6サーバが必要
 3. 別途外部からパケットキャプチャが必要
 
 [^2]: とはいえIPv4のブリッジ程度であれば、他社のルータでも実現できるかもしれない
 
-特に 2. と 3. は重要だ。市販ルータが扱えるDHCPv6オプションは少ないため、別途DHCPv6サーバを立てる必要がある。そのうえ、配るオプションの内容は、HGWのパケットを外からキャプチャして得なければならない[^3]。
+特に 2. と 3. は重要で、結局のところ市販ルータが扱えるDHCPv6オプションは少ないため、別途パケットをキャプチャしたり、DHCPv6サーバを立てたりする必要がある[^3]。
 
-[^3]: 詳しくは第三部で述べるが、DHCPv6リクエストに適切なオプション（Option 16, Vendor Class）を含めれば、ルータで直接ひかり電話関連情報を受信できる。しかしこれに対応した市販ルータは（おそらく）少ないし、よしんば受信できたとして、その情報を下流に送信できるとは思えない
+[^3]: 詳しくは第三部で述べるが、DHCPv6リクエストに適切なオプション（Option 16, Vendor Class）を含めれば、ルータで直接ひかり電話関連情報を受信できる。しかしこれに対応した市販ルータは（おそらく）少ないし、よしんば受信できても、その情報を下流に送信できない
 
-しかしLinuxでルータを作れば、これらすべての機能──IPv4のブリッジ、DHCPv6サーバ、DHCPv6オプションの受信──を一台で担える。そのうえ適当な端末（たとえばミニPC）さえあれば済む。ちょっとしたDIYで、シンプルかつ多機能な構成を実現できるのだ。
+しかしLinuxでルータを作れば、これらすべて──IPv4のブリッジ、DHCPv6サーバ、DHCPv6オプションの受信──を一台で担える。そのうえ適当な端末（たとえばミニPC）さえあれば済む。ちょっとしたDIYで、シンプルかつ多機能な構成を実現できるのだ。
 
 ## 環境
 
-使用した回線・機器などは以下の通り。
+参考のため、使用した回線・機器などを記しておく。
 
 ### 回線契約
 
@@ -116,11 +118,9 @@ order: 1
   - 固定（≒専有）IPではない
   - [フレッツ・ジョイント](https://www.ntt-west.co.jp/news/1304/130418a.html)を利用
 
-事情あってVDSLだが、それ以外はごく一般的な契約内容だと思われる。
+事情あってVDSLだが、それ以外はごく一般的な契約内容になっている。
 
-例示のため、プロバイダから割り振られたIPv6プレフィックスを`3fff:0:0:ab00::/56`と仮定する。
-
-IPv4 over IPv6の接続に必要な情報は、あらかじめプロバイダから得るか、さもなくば[計算機](https://ipv4.web.fc2.com/map-e.html)などで算出しておく。ここでは以下のように仮定する。
+以下では例示のため、プロバイダから割り振られたIPv6プレフィックスを`3fff:0:0:ab00::/56`とする。IPv4 over IPv6の接続に必要な情報は、あらかじめプロバイダから得るか、さもなくば[計算機](https://ipv4.web.fc2.com/map-e.html)などで算出しておく。ここでは下表のように仮定する。
 
 | 項目                    | 値                     |
 | :-------------------- | :-------------------- |
@@ -129,7 +129,7 @@ IPv4 over IPv6の接続に必要な情報は、あらかじめプロバイダか
 | PS（= ポートセット）ID        | `171`（10進）/ `ab`（16進） |
 | option peeraddr（= BR） | `2001:db8::1/64`      |
 
-[^4]: この記事では、VDSLモデム（ないしONU）とHGWが独立していることを暗黙の前提としている。両者が一体化しているタイプのHGWの場合、いわゆる「UNI出し」をするとこの状態にできる。小型ONUの場合は、Linuxルータに別途SFP+ポートが必要になる
+[^4]: この記事では、VDSLモデム（ないしONU）とHGWが独立していることを暗黙の前提としている。両者が一体化しているHGWの場合、いわゆる「UNI出し」をするとこの状態にできる。小型ONUの場合は、Linuxルータに別途SFP+ポートが必要になる
 
 ### 機器
 
@@ -142,20 +142,20 @@ IPv4 over IPv6の接続に必要な情報は、あらかじめプロバイダか
 
 [^5]: VLANを駆使すれば、ポートが一つでもなんとかなるかもしれない
 
-ルータ用には、適当なミニPCを使った。ミニPCだけではポート数が足りないため、別途タグVLAN対応のL2スイッチも用意した。
+ルータ用の機材には、適当なミニPCを用意した。ミニPCだけではポート数が足りないため、タグVLANに対応したL2スイッチで補った。
 
 ## ネットワーク設計
 
-今回自作ルータが担う役割を整理すると、以下のようになる。
+今回自作ルータが担う役割を整理しておこう。
 
 1. 基本的なルータの機能
    - **DHCPv6クライアントを動かし**、フレッツ網からIPv6プレフィックスを受け取る
      - **同時に、ひかり電話関連情報（DHCPv6オプション）も受け取る**
-   - **IPv4 over IPv6のトンネルを通す**
-   - VLANで宅内機器側のセグメントを作り、IPv6・IPv4を配る
-   - その他、ファイアウォールなども設定
+   - **IPv4 over IPv6（MAP-E）のトンネルを張る**
+   - 宅内機器側のセグメントを作り、IPv6・IPv4を配る
+   - その他、ファイアウォールなど
 2. ひかり電話ルータ（HGW）の世話
-   - VLANでHGW側のセグメントを分離する
+   - HGW側のセグメントを分離する
    - **フレッツ網-HGW間のIPv4パケットをブリッジする**
    - DHCPv6-PDサーバを動かし、HGW向けにフレッツ網に似たIPv6環境を整える
      - IPv6プレフィックスの一部をHGWに再委譲する
@@ -163,15 +163,13 @@ IPv4 over IPv6の接続に必要な情報は、あらかじめプロバイダか
 
 このうち太字の項目に関連して、いくつか考慮すべき点がある。
 
-### DHCPv6クライアントを動かすインターフェースについて
+### IPv4パケットのブリッジについて
 
-ルータのWAN側インターフェースは、その性質上、フレッツ網とHGWを繋ぐブリッジのメンバーになる。このため、当該インターフェースではDHCPv6クライアントを動かすことができない。代わりに、ブリッジデバイスでDHCPv6クライアントを動作させる[^6]。
+ブリッジデバイスを使ってもよいが、nftablesの[fwd文](https://www.netfilter.org/projects/nftables/manpage.html#:~:text=FWD%20STATEMENT)が便利だ。入ってくる生のパケットをそのまま別のインターフェースに転送できるので、実質L2スイッチのように振る舞ってくれる。
 
-[^6]: MACVLANでWAN側インターフェースを二つの仮想インターフェースに分割し、片方をブリッジに組み込む構成も試したが、うまく機能しなかった（下りのパケットを適切に処理できなかった）
+### MAP-Eのポート振り分けについて
 
-### IPv4 over IPv6のポート振り分けについて
-
-IPv4 over IPv6（MAP-E）に関しては、以下の記事が注目に値する。
+MAP-Eに関しては、以下の記事が注目に値する。
 
 [https://turgenev.hatenablog.com/entry/2024/04/23/031222](https://turgenev.hatenablog.com/entry/2024/04/23/031222)
 
@@ -179,27 +177,29 @@ IPv4 over IPv6（MAP-E）に関しては、以下の記事が注目に値する�
 
 ### ひかり電話関連情報の取得・配布について
 
-ひかり電話関連情報の受け渡しは意外に難しい。
+ひかり電話関連情報の扱いは意外に難しい。
 
-理想としては、フレッツ網から受け取ったDHCPv6オプションを、そのままHGWに「中継」できればよいが、あいにくそうはいかない。代わりに、**DHCPv6のリースを受けるたびに、リース内容をもとにDHCPv6サーバの設定を更新する**仕組みを作る。
+理想としては、フレッツ網から受け取ったDHCPv6オプションをそのままHGWに「中継」できればよいが、これができるソフトウェアはいまのところない。そこで代わりに、**DHCPv6のリースを受けるたびに、リース内容をもとにDHCPv6サーバの設定を更新する**仕組みを作る。
 
-鍵となるのは、systemd-networkdの[D-Bus API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.network1.html)と、Kea（DHCPv6サーバ）の[Management API](https://kea.readthedocs.io/en/stable/arm/ctrl-channel.html)だ。systemd-networkdは、リースを受けるたびにD-Busシグナルを飛ばしてくれるうえ、リースの内容自体もD-Busで取得できる。一方、KeaのManagement APIを使うと、HTTPで動的に設定を投入できる。両者を合わせると[^7]、以下のような処理が可能になる。
+鍵となるのは、systemd-networkdの[D-Bus API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.network1.html)と、Kea（DHCPv6サーバ）の[Management API](https://kea.readthedocs.io/en/stable/arm/ctrl-channel.html)だ。systemd-networkdは、リースを受けるたびにD-Busシグナルを飛ばしてくれるうえ、リースの内容自体もD-Busで取得できる。一方、KeaのManagement APIを使うと、HTTPで動的に設定を投入できる。両者を合わせると[^6]、以下のような処理が可能になる。
 
-[^7]: systemd-networkdには[DHCPv6サーバ機能がない](https://github.com/systemd/systemd/issues/16039)ため、併用が必要
+[^6]: systemd-networkdには[DHCPv6サーバ機能がない](https://github.com/systemd/systemd/issues/16039)ため、併用が必要
 
 1. DHCPv6リースを受けた際のD-Busシグナルを検知
 2. D-Busを叩き、リース情報を取得
 3. リース情報を元に、KeaのAPIを叩いて設定を更新
 
-なお、実装はPythonで行うことにした。こんな処理のためにコンパイルはしたくないし、かといってシェルスクリプトには荷が重いからだ。D-Busとのやり取りには[python-sdbus](https://github.com/python-sdbus/python-sdbus)というライブラリを使った。
+この処理を適当な言語[^7]で実装[^8]すれば、仮に将来フレッツ網から降ってくる情報が変わっても対応できる。
+
+[^7]: なお、実装はPythonで行った。こんな処理をわざわざコンパイルするのも気が引けるし、かといってシェルスクリプトには荷が重いからだ
+
+[^8]: D-Busとのやり取りには、[python-sdbus](https://github.com/python-sdbus/python-sdbus)というライブラリを使った
 
 ## ネットワーク構成
 
-以上を実際の接続に落とし込んだ図がこちら
+以上を実際の接続に落とし込み、以下の図のようになった。
 
 ### 物理接続
-
-青色は光ファイバー・LANケーブル、灰色は電話線による接続を指す。
 
 ```d2 alt="物理接続"
 direction: right
@@ -271,9 +271,9 @@ home: 自宅 {
 
 ```
 
-### 論理接続
+（青色は光ファイバー・LANケーブル、灰色は電話線）
 
-黒色はIPv6 IPoE接続、赤色はIPv4 over IPv6接続、水色はHGW専用のIPv4接続を指す。
+### 論理接続
 
 ```d2 alt="論理接続"
 vars: {
@@ -347,13 +347,12 @@ router: ルータ {
     shape: sql_table
     IPv4: 192.0.2.1/32
   }
-  br0: br0 (wan0 + hgw) {
+  wan0: {
     shape: sql_table
     委譲プレフィックス: 3fff:0:0:ab00::/56
     割当サブネット (v6): 3fff:0:0:ab00::/64
     CEアドレス: 3fff:0:0:ab00::ce/64
   }
-  wan0
   lan0: {
     home: {
       shape: sql_table
@@ -401,61 +400,62 @@ HGW: {
 ngn -- vne -- internet.v6 {class: ipv6}
 vne -- internet.v4: {class: ipv4}
 
-ngn -- router.br0: DHCPv6-PD\n(/56) {class: ipv6}
+ngn -- router.wan0: DHCPv6-PD\n(/56) {class: ipv6}
 ngn -- router.wan0: DHCPv4\n(/30) {class: ipv4-hgw}
 
-router.br0 -- vne.br: IPv4 over IPv6\nトンネル {class: ipv4; style.stroke-dash: 3}
-router.br0 <-> router.mape0: カプセル処理 {class: ipv4; style.stroke-dash: 3}
+router.wan0 -- vne.br: IPv4 over IPv6\nトンネル {class: ipv4; style.stroke-dash: 3}
+router.wan0 <-> router.mape0: カプセル処理 {class: ipv4; style.stroke-dash: 3}
 router.mape0 -- router.lan0.home: NAT +\nポート変換（tc） {class: ipv4}
 router.lan0.home -- switch.trunk: DHCPv4 (/24)  {class: ipv4}
 switch.trunk -- switch.vlan-home -- home-devices: {class: ipv4}
-router.br0 -- router.lan0.home {class: ipv6}
+router.wan0 -- router.lan0.home {class: ipv6}
 router.lan0.home -- switch.trunk: SLAAC + RDNSS {class: ipv6}
 switch.trunk -- switch.vlan-home -- home-devices {class: ipv6}
-router.br0 -- router.lan0.hgw {class: ipv6}
+router.wan0 -- router.lan0.hgw {class: ipv6}
 router.lan0.hgw -- switch.trunk: DHCPv6-PD\n(/60) {class: ipv6}
 switch.trunk -- switch.vlan-hgw -- HGW {class: ipv6}
-router.wan0 -- router.br0: ブリッジ {class: ipv4-hgw; style.stroke-dash: 3}
-router.br0 -- router.lan0.hgw: ブリッジ {class: ipv4-hgw; style.stroke-dash: 3}
+router.wan0 -- router.lan0.hgw: 転送（L2） {class: ipv4-hgw; style.stroke-dash: 3}
 router.lan0.hgw -- switch.trunk -- switch.vlan-hgw -- HGW: {class: ipv4-hgw}
 
 HGW -- 電話機: 電話線 {style.stroke: gray}
 ```
 
+（黒色はIPv6 IPoE接続、赤色はIPv4 over IPv6接続、水色はHGW専用のIPv4接続）
+
 ### 補足
 
-ルータの物理インターフェースは以下の2つある。
+ルータの物理インターフェースは以下の2つ。
 
-- `wan0`（MAC: `de:ad:be:ef:00:01` と仮定）
-- `lan0`（MAC: `de:ad:be:ef:00:02` と仮定）
+- `wan0`（MAC: `de:ad:be:ef:00:01`）
+- `lan0`（MAC: `de:ad:be:ef:00:02`）
 
-これに加えて、仮想インターフェースとして以下の4つを作成する。
+これに加えて、仮想インターフェースとして以下の3つを作成する。
 
-- `br0`：ブリッジデバイス（`wan0`+`hgw`） 兼 DHCPv6クライアント
-  - ブリッジは、`wan0`-`hgw`間のIPv4を透過し、IPv6をルーティングする
-- `mape0@br0`：IPv4 over IPv6のトンネルデバイス
+- `mape0@wan0`：IPv4 over IPv6のトンネルデバイス
 - `home@lan0`：VLAN用サブインターフェース（ID = 10）
   - 宅内機器側セグメントのデフォルトゲートウェイ
 - `hgw@lan0`：VLAN用サブインターフェース（ID = 100）
   - HGW側セグメントのデフォルトゲートウェイ（IPv6のみ）
 
-L2スイッチ側でも、サブインターフェースに対応したタグVLAN（ID = 10, 100）を設定する[^8]。
+L2スイッチ側でも、これに対応したタグVLAN（ID = 10, 100）を設定する[^9]。
 
-[^8]: なお、もう一つVLANを切ってHGWのLAN側と接続しておくと、ルータ経由でHGWのWeb設定画面にアクセスできて便利だが、今回は省略した
+[^9]: なお、もう一つVLANを切ってHGWの**LAN側**と接続しておくと、ルータ経由でHGWのWeb設定画面にアクセスできて便利だが、今回は省略した
 
 ## 手順1：環境構築
 
 ### 免責
 
-手元では、以下の構成は安定して動作しており、実用上も問題は出ていない。しかしあくまでも実験的な構成であり、事業者の想定していない状態であることは留意ねがいたい。したがって動作は保証できないし、この記事の内容を実践した結果としていかなる損害が生じても、私は一切責任を負わない。
+手元では、以下の構成は安定して動作しており、実用上も問題は出ていない。しかしあくまでも事業者の想定していない構成であることは留意ねがいたい。動作は保証できないし、この記事の内容を実践した結果としていかなる損害が生じても、私は一切責任を負わない。
 
 ### #ArchLinuxInstallBattle
 
 \{まず、ミニPCにArch Linuxをインストールする|I use Arch, BTW}。
 
-使用するLinuxディストリビューションは自由だが、systemd-networkdを使う都合上、systemdのバージョンが新しいほうが良い。解説記事が無数にあるため、詳細なインストールプロセスは省略する。
+使用するLinuxディストリビューションは自由だが、systemd-networkdを使う都合上、systemdのバージョンが新しいほうがおそらく良い。
 
-あらかじめ、後で必要になるソフトウェアをインストールしておく。
+解説記事が無数にあるため、詳細なインストールプロセスは省略する。なお、意味があるかはわからないが、カーネルには`linux-rt`を使った。
+
+この段階で、後で必要になるソフトウェアもインストールしておく。
 
 ```sh
 pacman -S ethtool nftables iptables-nft ndisc6 kea jq
@@ -464,22 +464,20 @@ paru -S python-sdbus
 
 ### NICのチューニング
 
-続いてNICのチューニングをする（端末によっては不要）。
+続いてNICのチューニングをする（このあたりは使う機材による）。
 
-使用する端末には、RTL8125BというRealtek :crab: の2.5GbE NICが載っている。しかし初期状態では汎用のドライバ（`r8169`）で動いており、本来の機能を発揮できない。
+今回使った機材には、RTL8125BというRealtek :crab: の2.5GbE NICが載っていた。しかし初期状態では汎用のドライバ（`r8169`）で動いており、本来の機能を発揮できない。そこで製造元から配られている専用ドライバをインストールする。Arch Linuxの場合、[AURにあるパッケージ](https://aur.archlinux.org/packages/r8125-dkms)を使うと楽だ。
 
-そこで製造元から配られている専用ドライバをインストールする。Arch Linuxの場合、[AURにあるパッケージ](https://aur.archlinux.org/packages/r8125-dkms)を使うと楽だ。
+デフォルトのビルド設定はかなり保守的になっていて、たとえばマルチキューなどの機能が有効化されていない。そのため、適宜書き換えてビルドする[^10]。
 
-デフォルトのMakefileはかなり保守的になっていて、たとえばマルチキューなどの機能が有効化されていない。そのため、適宜書き換えてビルドする[^9]。
-
-[^9]: OpenWrtでは[デフォルトでマルチキューが有効化されている](https://github.com/openwrt/openwrt/pull/18573)ため、それに倣った
+[^10]: OpenWrtでは[デフォルトでマルチキューが有効化されている](https://github.com/openwrt/openwrt/pull/18573)ため、それに倣った
 
 ```diff title="r8125-rss-dkms/PKGBUILD" lang="sh"
 # （前略）
 _pkgname=r8125
 -pkgname=${_pkgname}-dkms
 +pkgname=${_pkgname}-rss-dkms
-pkgver=9.016.00
+pkgver=9.016.01
 # （中略）
 package() {
 # （中略）
@@ -490,6 +488,7 @@ package() {
 +  sed -e 's/ENABLE_RSS_SUPPORT = n/ENABLE_RSS_SUPPORT = y/' \
 +    -e 's/ENABLE_MULTIPLE_TX_QUEUE = n/ENABLE_MULTIPLE_TX_QUEUE = y/' \
 +    -e 's/CONFIG_ASPM = y/CONFIG_ASPM = n/' \
++    -e 's/ENABLE_PAGE_REUSE = n/ENABLE_PAGE_REUSE = y/' \
 +    -i "${pkgdir}/usr/src/${dir_name}/Makefile"
 }
 ```
@@ -502,12 +501,12 @@ package() {
 blacklist r8169
 ```
 
-次回の起動時に`r8125`ドライバがロードされ、マルチキューが有効化されるはずだ。
+次回の起動時には`r8125`ドライバがロードされ、マルチキューが有効化されているはずだ。
 
 ```console {2}
 > ethtool -i wan0
 driver: r8125
-version: 9.016.00-NAPI-RSS
+version: 9.016.01-NAPI-RSS
 firmware-version: 
 expansion-rom-version: 
 bus-info: 0000:03:00.0
@@ -533,14 +532,14 @@ Other:          n/a
 Combined:       n/a
 ```
 
-せっかくマルチキューが使えるようになったので、irqbalanceでキューを各CPUコアに振り分けるようにしておく（おまじない）。
+せっかく複数の送受信キューが使えるようになったので、irqbalanceでキューを各CPUコアに振り分けるようにしておく（おまじない）。
 
 ```sh
 pacman -S irqbalance
 systemctl enable --now irqbalance
 ```
 
-ついでにNICの送受信バッファも大きくする（おまじない）。適当にRX = 512、TX = 1024とした。
+ついでにNICの細かい設定もしておく。
 
 ```systemd
 # /etc/systemd/network/01-wan0.link
@@ -550,65 +549,33 @@ PermanentMACAddress=de:ad:be:ef:00:01
 
 [Link]
 Name=wan0
-RxBufferSize=512
-TxBufferSize=1024
 # MACアドレスのランダム化
 MACAddressPolicy=random
 ```
 
 ```systemd
 # /etc/systemd/network/01-lan0.link
+
 [Match]
 PermanentMACAddress=de:ad:be:ef:00:02
 
 [Link]
 Name=lan0
-RxBufferSize=512
-TxBufferSize=1024
-```
-
-```console {10, 13}
-> ethtool -g wan0
-Ring parameters for wan0:
-Pre-set maximums:
-RX:			1024
-RX Mini:		n/a
-RX Jumbo:		n/a
-TX:			1024
-TX push buff len:	n/a
-Current hardware settings:
-RX:			512
-RX Mini:		n/a
-RX Jumbo:		n/a
-TX:			1024
-RX Buf Len:		n/a
-CQE Size:		n/a
-TX Push:		off
-RX Push:		off
-TX push buff len:	n/a
-TCP data split:		n/a
+# Wake-On-LAN
+WakeOnLan=magic
 ```
 
 ### カーネルパラメータのチューニング
 
-[ArchWiki](https://wiki.archlinux.org/title/Sysctl)の教えに従い、TCP / UDPのさまざまなパラメータを調整する。すべておまじないだ（世界の再魔術化）。
+[ArchWiki](https://wiki.archlinux.org/title/Sysctl)の教えに従い、TCP関連のさまざまなパラメータを調整する。
 
 ```ini title="/etc/sysctl.d/99-tuning.conf"
 net.ipv4.tcp_slow_start_after_idle = 0
 net.core.default_qdisc = cake
 net.ipv4.tcp_congestion_control = bbr
-net.core.netdev_max_backlog = 16384
-net.core.rmem_default = 1048576
-net.core.rmem_max = 16777216
-net.core.wmem_default = 1048576
-net.core.wmem_max = 16777216
-net.core.optmem_max = 65536
-net.ipv4.tcp_rmem = 4096 1048576 2097152
-net.ipv4.tcp_wmem = 4096 65536 16777216
-net.ipv4.udp_rmem_min = 8192
-net.ipv4.udp_wmem_min = 8192
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_ecn = 1
 ```
 
 もちろんルータとして使う以上、IPv4 / IPv6の転送設定は必須だ。
@@ -627,4 +594,4 @@ net.core.fb_tunnels_only_for_init_net = 2
 
 ***
 
-ここまでで一通りの環境構築は済んだ。[第二部](./bet-all-on-systemd-2)では端末をフレッツ網へ接続し、基本的なルータとしての機能を実現する。
+ここまでで一通りの環境構築が済んだ。[第二部](./bet-all-on-systemd-2)では端末をフレッツ網へ接続し、基本的なルータとしての機能を実現する。

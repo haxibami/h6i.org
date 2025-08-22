@@ -1,6 +1,7 @@
 ---
 title: "systemdに全部賭けろ（第三部）"
 date: 2025-08-06
+lastmod: 2025-08-23
 description: "Linuxでルータを作る（ホームゲートウェイ設置編）"
 tags: ["bet-all-on-systemd", "tech", "network", "linux"]
 emoji: "☎️"
@@ -25,21 +26,17 @@ order: 3
 
 ### HGW側インターフェースの設定
 
-HGW側インターフェース（`hgw`）の設定はやや複雑だ。[ネットワーク構成](./bet-all-on-systemd-1#ネットワーク構成)からわかる通り、`hgw`は
+HGW側インターフェース（`hgw`）の設定はやや複雑だ。
 
-1. `br0`ブリッジのメンバー
-2. IPv6のデフォルトゲートウェイ
-3. DHCPv6サーバ
-
-の三つの役割をもつ。このうち3. はKeaに任せるが、ブリッジへの追加（1.）と、RAによるデフォルトゲートウェイの通知[^1]（2.）は別途行う必要がある。
+[ネットワーク構成](./bet-all-on-systemd-1#ネットワーク構成)でみた通り、HGWに対してはDHCPv6-PDでプレフィックスを配る必要がある。このとき、DHCPv6サーバ自体はKeaに任せるとしても、RAによるデフォルトゲートウェイの通知[^1]が別途必要になる。この部分については、systemd-networkdだけで実現できる。
 
 [^1]: DHCPv6ではデフォルトゲートウェイを通知できないため
 
-送信するRAの内容は、（HGWが本来受け取る）フレッツ網のものを参考にするとよい。
+RAのパラメータは、（HGWが本来受け取る）フレッツ網のものを参考にして決めるとよい。
 
 ```console {4-6,10-12}
-> rdisc6 -1 br0
-Soliciting ff02::2 (ff02::2) on br0...
+> rdisc6 -1 wan0
+Soliciting ff02::2 (ff02::2) on wan0...
 
 Hop limit                 :           64 (      0x40)
 Stateful address conf.    :          Yes
@@ -62,7 +59,6 @@ Retransmit time           :        10000 (0x00002710) milliseconds
 Name=hgw
 
 [Network]
-Bridge=br0
 LinkLocalAddressing=ipv6
 IPv6StableSecretAddress=xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx
 IPv6Forwarding=yes
@@ -79,117 +75,129 @@ ReachableTimeSec=300
 RetransmitSec=10
 ```
 
-### ブリッジの転送ルール設定
+### IPv4の転送ルール設定
 
-続いて、ブリッジ（`br0`）の転送ルールを設定する。ブリッジのフィルタリングには、nftablesの[bridgeファミリー](https://wiki.nftables.org/wiki-nftables/index.php/Bridge_filtering)が便利だ[^2]。
+HGW向けに、IPv4をルーティングせず転送するルールも設定する。
 
-[^2]: これはかつてのebtablesやbr\_netfilterを代替するらしい
-
-```NFTables title="/etc/nftables.d/51-brouter.nft"
+```NFTables title="/etc/nftables.d/lazy/hgw.nft"
 #!/usr/sbin/nft -f
-destroy table bridge brouter
 
-table bridge brouter {
-  chain prerouting {
-    type filter hook prerouting priority -300; policy accept;
-    # IPv6パケットをルーティングに回す
-    iifname hgw ether type ip6 counter meta broute set 1 accept;
-    counter
+destroy table netdev bridge-hgw-v4
+
+table netdev bridge-hgw-v4 {
+  chain inbound {
+    type filter hook ingress device "wan0" priority -500; policy accept;
+    ether type { ip, arp } counter fwd to "hgw"
   }
 
-  chain forward {
-    type filter hook forward priority 0; policy drop;
-    ct state { established, related } counter accept;
-    # IPv4パケットのブリッジ通過を許可
-    iifname hgw oif wan0 ether type { ip, arp } counter accept;
-    iif wan0 oifname hgw ether type { ip, arp } counter accept;
-    counter
+  chain outbound {
+    type filter hook ingress device "hgw" priority -500; policy accept;
+    ether type { ip, arp } counter fwd to "wan0"
   }
 }
 ```
 
-処理の流れは、[公式ページ](https://wiki.nftables.org/wiki-nftables/index.php/Netfilter_hooks)の図を見ると理解しやすい。とはいえ、インターネット上の設定例も少ないテーマなので、少しだけ補足しておく（誤りがあったら指摘してほしい）。
+これだけで、`wan0`に入ってきたIPv4パケットは、（L3に上がることなく）即座に`hgw`から出ていくようになる。逆も然り。
 
-#### IPv4パケットの流れ
+```systemd title="/etc/systemd/system/nftables-hgw.service"
+[Unit]
+Description=Apply nftables filter rules for mape0
+BindsTo=sys-subsystem-net-devices-hgw.device
+After=sys-subsystem-net-devices-hgw.device nftables.service
+Requires=nftables.service
 
-1. `hgw`から入った上りパケットは、（`hgw`が`br0`のメンバーであるため）bridgeレイヤへ向かう
-2. preroutingフックを通過し、forwardフックに入る
-3. forwardフックでIPv4（`ip`/`arp`）パケットのみを明示的に許可しているため、これも通過し、`wan0`からフレッツ網に出ていく
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/lazy/hgw.nft
+RemainAfterExit=true
 
-下りについても、インターフェースが逆になるだけで同様となる。
+[Install]
+WantedBy=multi-user.target
+```
 
-#### IPv6パケットの流れ
+```sh
+systemctl enable nftables-hgw
+```
 
-1. `hgw`から入った上りパケットは、同じくbridgeレイヤへ向かう
-2. preroutingフックで`meta broute`に`1`がセットされるため、ルーティングに回される
-3. 通常のnftables（IPレイヤ）の処理に入り、`hgw`から来たパケットとして扱われる
-4. IPレイヤのforwardフックで転送が許可されている（[直後](#ファイアウォールの設定更新)で設定する）ため、`br0`からフレッツ網に出ていく
-
-下りは`br0`宛てに入ってくるため、上のルールに干渉せず`hgw`に到達できる（と思われる）[^3]。
-
-[^3]: あまり詳しくは追えていないが、そのような振る舞いをしているように見える
+ちなみに`ingress`フックは対象デバイスが存在しないとエラーになる。そのため上のようにsystemdサービスなどを利用し、デバイスの存在を保証してから適用する必要がある。
 
 ### ファイアウォールの設定更新
 
-HGWからのIPv6パケットを受け付けるよう、ファイアウォールにも設定を加えておく。
+HGWからのIPv6パケットを受け付けるよう、メインのファイアウォールにも設定を加えておく。
 
-<details>
-  <summary>変更点</summary>
+```diff title="/etc/nftables.conf" lang="NFTables"
+#!/usr/bin/nft -f
 
-  ```diff title="/etc/nftables.conf" lang="NFTables"
-  #!/usr/bin/nft -f
+destroy table inet filter
 
-  destroy table inet filter
-
-  table inet filter {
-    # （中略）
-    chain input {
-      type filter hook input priority filter; policy drop;
-
-      ct state invalid drop comment "early drop of invalid connections"
-      ct state { established, related } accept comment "allow tracked connections"
-      iif lo accept comment "allow from loopback"
-      ip6 nexthdr icmpv6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-request, echo-reply } limit rate 5/second burst 10 packets accept
-      ip6 nexthdr icmpv6 ip6 saddr fe80::/10 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, ind-neighbor-solicit, ind-neighbor-advert, 148, 149 } iifname "br0" accept
-  -    ip6 nexthdr icmpv6 icmpv6 type { mld-listener-query, mld-listener-report, mld-listener-done, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, ind-neighbor-solicit, ind-neighbor-advert, mld2-listener-report, 148, 149, 151, 152, 153 } iifname "home" accept
-  +    ip6 nexthdr icmpv6 icmpv6 type { mld-listener-query, mld-listener-report, mld-listener-done, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, ind-neighbor-solicit, ind-neighbor-advert, mld2-listener-report, 148, 149, 151, 152, 153 } iifname { "home", "hgw" } accept
-      ip protocol icmp accept comment "allow icmp"
-      udp dport bootps ip saddr 0.0.0.0 ip daddr 255.255.255.255 iifname "home" accept comment "allow dhcpv4"
-  -    udp dport dhcpv6-server ip6 saddr fe80::/10 ip6 daddr ff02::1:2 iifname "home" accept comment "allow dhcpv6"
-  +    udp dport dhcpv6-server ip6 saddr fe80::/10 ip6 daddr ff02::1:2 iifname { "home", "hgw" } accept comment "allow dhcpv6"
-      udp dport dhcpv6-client iifname "br0" accept
-      ip saddr @LANv4 jump lan_input comment "allow private services"
-      ip6 saddr @LANv6 iifname "home" jump lan_input comment "allow private services"
-
-      counter
-    }
-
-    chain forward {
-      type filter hook forward priority filter; policy drop;
-
-      iifname "home" ip protocol tcp tcp flags != syn / fin,syn,rst,ack ct state new counter reject with tcp reset
-  -    meta protocol ip6 iifname "home" tcp flags != syn / fin,syn,rst,ack ct state new counter accept
-  +    meta protocol ip6 iifname { "home", "hgw" } tcp flags != syn / fin,syn,rst,ack ct state new counter accept
-      ct state invalid drop
-      ct state { established, related } accept
-      ip protocol icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
-      ip6 nexthdr icmpv6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, echo-reply } accept
-
-      meta l4proto { tcp, udp } th dport { 135, 137-139, 445 } oifname { "br0", "mape0" } counter drop
-      iifname "home" oifname { "br0", "mape0" } accept
-  +    iifname "hgw" oifname "br0" accept
-
-      counter
-    }
+table inet filter {
+  set LANv4 {
+    type ipv4_addr; flags interval;
+    elements = { 10.0.0.0/24 }
   }
 
-  include "/etc/nftables.d/*.nft"
-  ```
-</details>
+  set LANv6 {
+    type ipv6_addr; flags interval;
+    elements = { fe80::/10 }
+  }
+
+  chain input {
+    type filter hook input priority filter; policy drop;
+    ct state invalid drop; ct state { established, related } accept;
+    iif lo accept
+    icmpv6 type {
+      destination-unreachable, 
+      packet-too-big,
+      time-exceeded,
+      parameter-problem,
+      nd-neighbor-solicit,
+      nd-neighbor-advert
+    } limit rate 5/second burst 10 packets accept
+    icmpv6 type { nd-router-advert } iif "wan0" counter accept
+-    icmpv6 type { echo-request, nd-router-solicit } iifname "home" counter accept
++    icmpv6 type { echo-request, nd-router-solicit } iifname { "home", "hgw" } counter accept
+    icmp type { destination-unreachable, time-exceeded, parameter-problem } limit rate 5/second burst 10 packets accept
+    icmp type { echo-request } iifname { "home" } accept
+    udp dport dhcpv6-client udp sport dhcpv6-server iif "wan0" ip6 saddr fe80::/10 counter accept
++    udp dport dhcpv6-server ip6 saddr fe80::/10 iifname "hgw" accept
+    udp dport bootps iifname "home" accept
+    ip saddr @LANv4 jump lan-input
+    ip6 saddr @LANv6 iifname { "home" } jump lan-input
+    counter
+  }
+
+  chain lan-input {
+    meta l4proto { tcp, udp } th dport { ssh, domain } accept
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+    tcp flags & (fin | syn | rst | ack) != syn ct state new jump tcp-reconnect
+    ct state invalid drop; ct state { established, related } accept;
+    icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } counter accept
+    icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
+    meta l4proto { tcp, udp } th dport { 135, 137-139, 445 } oifname { "wan0", "mape0" } counter drop comment "NetBIOS"
+-    iifname "home" oif "wan0" accept comment "v4"
++    iifname { "home", "hgw" } oif "wan0" accept comment "v4"
+    iifname "home" oifname "mape0" accept comment "v6"
+    counter
+  }
+
+  chain tcp-reconnect {
+-    meta protocol ip6 iifname "home" counter accept
++    meta protocol ip6 iifname { "home", "hgw" } counter accept
+    meta protocol ip iifname { "home" } counter reject with tcp reset
+  }
+}
+
+include "/etc/nftables.d/*.nft"
+```
 
 ### DHCPv6サーバの設定
 
-DHCPv6サーバ（Kea）は、以下の最低限の設定で動作させる。
+DHCPv6サーバ（Kea）は、下のような最低限の設定で動作させる。
+
+払い出すIPv6プレフィックスや、DHCPv6オプションの内容はここには書かない。[あとで書く処理](#ひかり電話関連情報の配布)で動的に追加するからだ。
 
 ```jsonc title="/etc/kea/kea-dhcp6.conf" {30-37}
 {
@@ -247,9 +255,7 @@ DHCPv6サーバ（Kea）は、以下の最低限の設定で動作させる。
 }
 ```
 
-払い出すIPv6プレフィックスや、DHCPv6オプションの内容を書く必要はない。[あとで書く処理](#ひかり電話関連情報の配布)で動的に追加するからだ。
-
-ただし、HGWにプレフィックスを払い出す際、払い出したプレフィックスへの経路を設定する必要がある（逆にリース失効時は経路を削除する必要がある）。このため[フック](https://kea.readthedocs.io/en/stable/arm/hooks.html#libdhcp-run-script-so-run-script-support-for-external-hook-scripts)を使い、払い出し・失効などのタイミングで以下のスクリプトを実行している。
+ただし、HGWにプレフィックスを払い出す際には、払い出したプレフィックスに向けて経路を設定する必要がある（逆に、失効時は削除が必要）。このため[フック](https://kea.readthedocs.io/en/stable/arm/hooks.html#libdhcp-run-script-so-run-script-support-for-external-hook-scripts)を使い、払い出し・失効などのタイミングで以下のスクリプトを実行している。
 
 ```sh title="/usr/share/kea/scripts/pd-route.sh"
 #!/bin/sh
@@ -277,10 +283,6 @@ case "$1" in
   on_commit
   ;;
 esac
-```
-
-```sh
-systemctl enable --now kea-dhcp6
 ```
 
 また、KeaのHTTP APIも有効化しておく。
@@ -322,21 +324,22 @@ systemctl enable --now kea-dhcp6
 ```
 
 ```sh
+systemctl enable --now kea-dhcp6
 systemctl enable --now kea-ctrl-agent
 ```
 
 ### ひかり電話関連情報の受信
 
-[第二部](./bet-all-on-systemd-2#ipv6-ipoe)のように、ただDHCPv6クライアントを動かしただけでは、ひかり電話の関連情報は降ってこない。やや天下り的だが、実はDHCPv6リクエストで
+[第二部](./bet-all-on-systemd-2#ipv6-ipoe)のように、ただDHCPv6クライアントを動かしただけでは、ひかり電話の関連情報は降ってこない。種明かしをしてしまうと、DHCPv6リクエストで
 
 - Option 17, 22, 23, 24, 31を要求し
 - Option 16に適切な値を含める
 
-ことで、必要な情報を受信できる。このことは、NTTの[技術参考資料](https://flets.com/pdf/ip-int-3.pdf)[^4]にほのめかされている。
+ことで、これらの情報を受信できる。実はこのことは、NTTの[技術参考資料](https://flets.com/pdf/ip-int-3.pdf)[^2]にほのめかされている。
 
-[^4]: 「IP通信網サービスのインタフェース」第三分冊（第45版）、2025年8月1日最終閲覧
+[^2]: 「IP通信網サービスのインタフェース」第三分冊（第45版）、2025年8月1日最終閲覧
 
-リンク先資料の「フレッツ 光ネクスト編」を見てみると、2.4.2.1.5「DHCPv6オプション」に以下のように書かれている。
+リンク先資料の「フレッツ 光ネクスト編」を見てみると、2.4.2.1.5「DHCPv6オプション」には以下のように書かれている。
 
 > Option Request に指定可能なオプション番号は、”17”,”22”,”23”,”24”,”31”です
 
@@ -348,13 +351,13 @@ systemctl enable --now kea-ctrl-agent
 
 > ネットワーク関連情報を設定する端末のハードウェアアドレス（MACアドレス）を設定
 
-とあり、HGWのMACアドレスを含めればよいことがわかる[^5]。
+とあり、HGWのMACアドレスを含めればよいことがわかる[^3]。
 
-[^5]: 実際、HGWが送っているDHCPv6リクエストをキャプチャしてみると、この通りになっている。というより本来は順序が逆で、先にキャプチャをしたことで技術資料の意味が明らかになったのだが、その点は置いておく
+[^3]: 実際、HGWが送っているDHCPv6リクエストをキャプチャしてみると、この通りになっている。というより本来は順序が逆で、先にキャプチャをしたことで技術資料の意味が明らかになったのだが、その点は置いておく
 
 これを踏まえ、DHCPv6クライアントの設定を追記する。
 
-```diff lang="systemd" title="/etc/systemd/network/05-br0.network"
+```diff lang="systemd" title="/etc/systemd/network/05-wan0.network"
 # ...
 [DHCPv6]
 DUIDType=link-layer
@@ -362,7 +365,7 @@ IAID=0
 SendHostname=no
 UseCaptivePortal=no
 UseDNR=no
-+# これがなければsystemd-networkdはOption 24を無視する
++# これがなければsystemd-networkdはOption 24を無視するため注意
 +UseDomains=yes
 +RequestOptions=17 22 23 24 31
 +# 一見文字列しかダメそうだが、実はhexも送れる
@@ -370,7 +373,7 @@ UseDNR=no
 # ...
 ```
 
-HGWのMACアドレス（`de:ad:be:ef:00:05`と仮定）は、ルータで
+必要なHGWのMACアドレス（`de:ad:be:ef:00:05`と仮定）は、ルータで
 
 ```console
 > ip -6 neigh show dev hgw | awk '{print $3}'
@@ -378,9 +381,9 @@ HGWのMACアドレス（`de:ad:be:ef:00:05`と仮定）は、ルータで
 de:ad:be:ef:00:05
 ```
 
-などとするか、HGWのWeb設定画面[^6]から確認する。
+とするか、HGWのWeb設定画面[^4]から確認する。
 
-[^6]: 手元のHGW（RX-600KI）の場合、「情報 > 現在の状態」から確認できた
+[^4]: 手元のHGW（RX-600KI）の場合、「情報 > 現在の状態」から確認できた
 
 設定を再読み込みし、D-Busを叩くと、
 
@@ -416,7 +419,7 @@ busctl -j call org.freedesktop.network1 /org/freedesktop/network1 org.freedeskto
 ]
 ```
 
-それぞれの設定（201, 202, 204, 210）の意味は以下のサイトなどを見るとわかる。
+なお、それぞれの設定（201, 202, 204, 210）の意味は以下のサイトなどを見るとわかる。
 
 [https://blog.goo.ne.jp/rabbit5151/e/be9ef5793b083e699167fcd71cbde499](https://blog.goo.ne.jp/rabbit5151/e/be9ef5793b083e699167fcd71cbde499)
 
@@ -424,7 +427,7 @@ busctl -j call org.freedesktop.network1 /org/freedesktop/network1 org.freedeskto
 
 最後に、DHCPv6のリースを検知して、Keaの設定を更新する処理を書く。
 
-設定はKeaを再起動すると吹き飛んでしまうため、DHCPv6のリース時だけでなく、Kea自体の再起動の際にも更新処理が走るようにしている。
+Keaの設定はKeaを再起動すると吹き飛んでしまうため、DHCPv6のリース時だけでなく、Kea自体の再起動の際にも更新処理が走るようにしている。
 
 <details>
   <summary>スクリプト（長いので注意）</summary>
@@ -457,7 +460,7 @@ busctl -j call org.freedesktop.network1 /org/freedesktop/network1 org.freedeskto
   NETWORKD_LINK_IF = "org.freedesktop.network1.Link"
   NETWORKD_DHCP6C_IF = "org.freedesktop.network1.DHCPv6Client"
 
-  DHCP6C_ETH = "br0"
+  DHCP6C_ETH = "wan0"
   HGW_ETH = "hgw"
 
   KEA_API = "http://127.0.0.1:8000"
@@ -699,19 +702,19 @@ busctl -j call org.freedesktop.network1 /org/freedesktop/network1 org.freedeskto
   ```
 </details>
 
-スクリプト内にも書いたが、執筆時点でstable版のsystemd（v257）では、IPv6のSIPサーバアドレスを取得できない[^7]。v258のリリースを待つか、手動でキャプチャ[^8]した結果をハードコードするほかない。
+スクリプト内にも書いたが、執筆時点でstable版のsystemd（v257）では、IPv6のSIPサーバアドレスを取得できない[^7]。そのためv258のリリースを待つか、手動でキャプチャ[^8]した内容をハードコードするほかない。
 
-[^7]: 仕方がないので[コントリビュートした](https://github.com/systemd/systemd/pull/38269)
+[^7]: 仕方がないのでこのために[コントリビュートした](https://github.com/systemd/systemd/pull/38269)
 
-[^8]: `tshark -i br0 -f "udp src port 547" -Y "dhcpv6.msgtype == 7 and dhcpv6.sip_server_a" -T ek -e dhcpv6.sip_server_a`
+[^8]: `tshark -i wan0 -f "udp src port 547" -Y "dhcpv6.msgtype == 7 and dhcpv6.sip_server_a" -T ek -e dhcpv6.sip_server_a`
 
-あとはこのスクリプトをsystemdサービスで実行すれば完成だ。
+あとはこのスクリプトをsystemdサービスで実行するよう設定すれば完成だ。
 
 ```systemd title="/etc/systemd/system/networkd-kea6-relay.service"
 [Unit]
 Description=Networkd DHCPv6 lease info relay for Kea
-After=network.target sys-subsystem-net-devices-br0.device
-BindsTo=sys-subsystem-net-devices-br0.device
+After=network.target sys-subsystem-net-devices-wan0.device
+BindsTo=sys-subsystem-net-devices-wan0.device
 
 [Service]
 ExecStart=/usr/local/bin/networkd-kea6-relay
@@ -731,13 +734,13 @@ systemctl enable --now networkd-kea6-relay
 
 ### IPv6 IPoE
 
-VDSL回線（\< 100Mbps）であるため、速度には期待していないが、それでも常時90Mbps程度は出ている。HGWを上流に置いていた際には時折パケットが詰まるような感じがあったが、それがなくなった。
+VDSL回線（\< 100Mbps）であるため、速度には期待していないものの、常時90Mbps程度は出ている。HGWを上流に置いていた際には時折パケットが詰まるような感じがあったが、それがなくなった。
 
 主要なCDNへのpingは数ms程度で通っており、遅延も問題ないと思われる。HGWを上流に置く場合より、心なしか（1-2ms程度）速くなっているかもしれない。
 
 ### IPv4 over IPv6
 
-速度・遅延についてはIPv6 IPoEと同様で、とくにオーバーヘッドはない。`tc`を使ったポートを振り分けも問題なく動作しており、（いわゆる）ニチバンベンチも快適にクリアできる。
+速度・遅延についてはIPv6 IPoEと同様で、オーバーヘッドはない。`tc`を使ったポート振り分けも問題なく動作しており、（いわゆる）ニチバンベンチも快適だ。
 
 ### HGW・ひかり電話
 
@@ -757,4 +760,4 @@ HGWのWeb設定画面から、DHCPの取得や、ファームウェアの更新�
 
 ## まとめ
 
-みなさんも夏休みの自由研究として、ルータを自作するとよいだろう :star\_struck:
+みなさんも夏休みの自由研究として、ルータを自作しよう :star\_struck:
