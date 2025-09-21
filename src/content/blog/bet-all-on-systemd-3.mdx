@@ -1,7 +1,7 @@
 ---
 title: "systemdに全部賭けろ（第三部）"
 date: 2025-08-06
-lastmod: 2025-08-23
+lastmod: 2025-09-21
 description: "Linuxでルータを作る（ホームゲートウェイ設置編）"
 tags: ["bet-all-on-systemd", "tech", "network", "linux"]
 emoji: "☎️"
@@ -28,11 +28,11 @@ order: 3
 
 HGW側インターフェース（`hgw`）の設定はやや複雑だ。
 
-[ネットワーク構成](./bet-all-on-systemd-1#ネットワーク構成)でみた通り、HGWに対してはDHCPv6-PDでプレフィックスを配る必要がある。このとき、DHCPv6サーバ自体はKeaに任せるとしても、RAによるデフォルトゲートウェイの通知[^1]が別途必要になる。この部分については、systemd-networkdだけで実現できる。
+[ネットワーク構成](./bet-all-on-systemd-1#ネットワーク構成)でみた通り、HGWに対してはDHCPv6-PDでプレフィックスを配布する。このとき、DHCPv6サーバ自体はKeaに任せるとしても、RAによるデフォルトゲートウェイの通知[^1]が別途必要になる。この部分については、systemd-networkdで実現する。
 
 [^1]: DHCPv6ではデフォルトゲートウェイを通知できないため
 
-RAのパラメータは、（HGWが本来受け取る）フレッツ網のものを参考にして決めるとよい。
+送信するRAのパラメータは、（HGWが本来受け取る）フレッツ網のものを参考にして決めるとよい。フレッツ網のRAは、以下のようにすると受信できる。
 
 ```console {4-6,10-12}
 > rdisc6 -1 wan0
@@ -60,7 +60,6 @@ Name=hgw
 
 [Network]
 LinkLocalAddressing=ipv6
-IPv6StableSecretAddress=xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx
 IPv6Forwarding=yes
 IPv6SendRA=yes
 
@@ -80,10 +79,9 @@ RetransmitSec=10
 HGW向けに、IPv4をルーティングせず転送するルールも設定する。
 
 ```NFTables title="/etc/nftables.d/lazy/hgw.nft"
-#!/usr/sbin/nft -f
+#!/usr/bin/nft -f
 
 destroy table netdev bridge-hgw-v4
-
 table netdev bridge-hgw-v4 {
   chain inbound {
     type filter hook ingress device "wan0" priority -500; policy accept;
@@ -99,16 +97,18 @@ table netdev bridge-hgw-v4 {
 
 これだけで、`wan0`に入ってきたIPv4パケットは、（L3に上がることなく）即座に`hgw`から出ていくようになる。逆も然り。
 
+ただし、nftablesの`ingress`フックは対象となるデバイスが存在しない場合エラーになる。そのため下のようにsystemdサービスを利用し、デバイスの存在を保証してから適用するのが安全だ。
+
 ```systemd title="/etc/systemd/system/nftables-hgw.service"
 [Unit]
-Description=Apply nftables filter rules for mape0
+Description=Apply nftables filter rules for hgw
 BindsTo=sys-subsystem-net-devices-hgw.device
 After=sys-subsystem-net-devices-hgw.device nftables.service
 Requires=nftables.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/nft -f /etc/nftables.d/lazy/hgw.nft
+ExecStart=/usr/bin/nft -f /etc/nftables.d/lazy/hgw.nft
 RemainAfterExit=true
 
 [Install]
@@ -119,8 +119,6 @@ WantedBy=multi-user.target
 systemctl enable nftables-hgw
 ```
 
-ちなみに`ingress`フックは対象デバイスが存在しないとエラーになる。そのため上のようにsystemdサービスなどを利用し、デバイスの存在を保証してから適用する必要がある。
-
 ### ファイアウォールの設定更新
 
 HGWからのIPv6パケットを受け付けるよう、メインのファイアウォールにも設定を加えておく。
@@ -129,16 +127,10 @@ HGWからのIPv6パケットを受け付けるよう、メインのファイア�
 #!/usr/bin/nft -f
 
 destroy table inet filter
-
 table inet filter {
   set LANv4 {
     type ipv4_addr; flags interval;
     elements = { 10.0.0.0/24 }
-  }
-
-  set LANv6 {
-    type ipv6_addr; flags interval;
-    elements = { fe80::/10 }
   }
 
   chain input {
@@ -158,35 +150,28 @@ table inet filter {
 +    icmpv6 type { echo-request, nd-router-solicit } iifname { "home", "hgw" } counter accept
     icmp type { destination-unreachable, time-exceeded, parameter-problem } limit rate 5/second burst 10 packets accept
     icmp type { echo-request } iifname { "home" } accept
-    udp dport dhcpv6-client udp sport dhcpv6-server iif "wan0" ip6 saddr fe80::/10 counter accept
-+    udp dport dhcpv6-server ip6 saddr fe80::/10 iifname "hgw" accept
+    udp dport dhcpv6-client iif "wan0" ip6 saddr fe80::/64 counter accept
++    udp dport dhcpv6-server iifname "hgw" ip6 saddr fe80::/64 accept
     udp dport bootps iifname "home" accept
-    ip saddr @LANv4 jump lan-input
-    ip6 saddr @LANv6 iifname { "home" } jump lan-input
+    ip saddr @LANv4 iifname { "home" } jump lan-services
+    ip6 saddr fe80::/64 iifname { "home" } jump lan-services
     counter
   }
 
-  chain lan-input {
+  chain lan-services {
     meta l4proto { tcp, udp } th dport { ssh, domain } accept
   }
 
   chain forward {
     type filter hook forward priority filter; policy drop;
-    tcp flags & (fin | syn | rst | ack) != syn ct state new jump tcp-reconnect
     ct state invalid drop; ct state { established, related } accept;
     icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } counter accept
     icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
-    meta l4proto { tcp, udp } th dport { 135, 137-139, 445 } oifname { "wan0", "mape0" } counter drop comment "NetBIOS"
--    iifname "home" oif "wan0" accept comment "v4"
-+    iifname { "home", "hgw" } oif "wan0" accept comment "v4"
-    iifname "home" oifname "mape0" accept comment "v6"
+    meta l4proto { tcp, udp } th dport { 135, 137-139, 445 } oifname { "wan0", "ip6tnl0" } counter drop comment "NetBIOS"
+-    iifname "home" oif "wan0" accept comment "v6"
++    iifname { "home", "hgw" } oif "wan0" accept comment "v6"
+    iifname "home" oifname "ip6tnl0" accept comment "v4"
     counter
-  }
-
-  chain tcp-reconnect {
--    meta protocol ip6 iifname "home" counter accept
-+    meta protocol ip6 iifname { "home", "hgw" } counter accept
-    meta protocol ip iifname { "home" } counter reject with tcp reset
   }
 }
 
@@ -195,9 +180,9 @@ include "/etc/nftables.d/*.nft"
 
 ### DHCPv6サーバの設定
 
-DHCPv6サーバ（Kea）は、下のような最低限の設定で動作させる。
+DHCPv6サーバ（Kea）には、下のような最低限の設定を投入する。
 
-払い出すIPv6プレフィックスや、DHCPv6オプションの内容はここには書かない。[あとで書く処理](#ひかり電話関連情報の配布)で動的に追加するからだ。
+払い出すIPv6プレフィックスや、DHCPv6オプションの内容を書く必要はない。[あとで書くプログラム](#ひかり電話関連情報の配布)で動的に追加するからだ。
 
 ```jsonc title="/etc/kea/kea-dhcp6.conf" {30-37}
 {
@@ -255,7 +240,7 @@ DHCPv6サーバ（Kea）は、下のような最低限の設定で動作させ�
 }
 ```
 
-ただし、HGWにプレフィックスを払い出す際には、払い出したプレフィックスに向けて経路を設定する必要がある（逆に、失効時は削除が必要）。このため[フック](https://kea.readthedocs.io/en/stable/arm/hooks.html#libdhcp-run-script-so-run-script-support-for-external-hook-scripts)を使い、払い出し・失効などのタイミングで以下のスクリプトを実行している。
+ただし、HGWにプレフィックスを払い出す際には、払い出したプレフィックスに向けた経路も設定する必要がある（逆に、失効時は経路の削除が必要）。このため[フック](https://kea.readthedocs.io/en/stable/arm/hooks.html#libdhcp-run-script-so-run-script-support-for-external-hook-scripts)を使い、払い出し・失効などのタイミングで以下のスクリプトを実行している。
 
 ```sh title="/usr/share/kea/scripts/pd-route.sh"
 #!/bin/sh
@@ -285,7 +270,7 @@ case "$1" in
 esac
 ```
 
-また、KeaのHTTP APIも有効化しておく。
+また、KeaのHTTP APIも設定しておく。
 
 ```jsonc title="/etc/kea/kea-ctrl-agent.conf"
 {
@@ -330,7 +315,7 @@ systemctl enable --now kea-ctrl-agent
 
 ### ひかり電話関連情報の受信
 
-[第二部](./bet-all-on-systemd-2#ipv6-ipoe)のように、ただDHCPv6クライアントを動かしただけでは、ひかり電話の関連情報は降ってこない。種明かしをしてしまうと、DHCPv6リクエストで
+さて、[第二部](./bet-all-on-systemd-2#ipv6-ipoe)のように、ただDHCPv6クライアントを動かしただけでは、ひかり電話の関連情報は降ってこない。種明かしをしてしまうと、DHCPv6リクエストで
 
 - Option 17, 22, 23, 24, 31を要求し
 - Option 16に適切な値を含める
@@ -373,7 +358,7 @@ UseDNR=no
 # ...
 ```
 
-必要なHGWのMACアドレス（`de:ad:be:ef:00:05`と仮定）は、ルータで
+必要なHGWのMACアドレス（ここでは`de:ad:be:ef:00:05`と仮定）は、ルータで
 
 ```console
 > ip -6 neigh show dev hgw | awk '{print $3}'
@@ -381,7 +366,7 @@ UseDNR=no
 de:ad:be:ef:00:05
 ```
 
-とするか、HGWのWeb設定画面[^4]から確認する。
+などとするか、HGWのWeb設定画面[^4]から確認する。
 
 [^4]: 手元のHGW（RX-600KI）の場合、「情報 > 現在の状態」から確認できた
 
@@ -468,9 +453,6 @@ Keaの設定はKeaを再起動すると吹き飛んでしまうため、DHCPv6�
   KEA_MAX_RETRIES = 10
   KEA_RETRY_DELAY = 5
 
-  # SIPサーバをD-Busで取得するにはsystemd v258が必要。それまではハードコードしておく
-  SIP_SERVERS = ["YOUR_SIP_SERVER_ADDR"]
-
 
   class Networkd(DbusInterfaceCommonAsync, interface_name=NETWORKD_MGR_IF):
       def __init__(self) -> None:
@@ -528,12 +510,8 @@ Keaの設定はKeaを再起動すると吹き飛んでしまうため、DHCPv6�
           dhcp6 = loads(await NetworkdLink(linkpath).describe())
           dns, ntp, sip = [
               ", ".join([IPv6Address(bytes(e["Address"])).compressed for e in dhcp6[k]])
-              for k in ["DNS", "NTP"]
-          ] + SIP_SERVERS
-          # dns, ntp, sip = [
-          #     ", ".join([IPv6Address(bytes(e["Address"])).compressed for e in dhcp6[k]])
-          #     for k in ["DNS", "NTP", "SIP"]
-          # ]
+              for k in ["DNS", "NTP", "SIP"]
+          ]
           self.state = {
               "prefix": IPv6Address(bytes(dhcp6["DHCPv6Client"]["Prefixes"][0]["Prefix"])),
               "dns": dns,
@@ -702,11 +680,9 @@ Keaの設定はKeaを再起動すると吹き飛んでしまうため、DHCPv6�
   ```
 </details>
 
-スクリプト内にも書いたが、執筆時点でstable版のsystemd（v257）では、IPv6のSIPサーバアドレスを取得できない[^7]。そのためv258のリリースを待つか、手動でキャプチャ[^8]した内容をハードコードするほかない。
+~~スクリプト内にも書いたが、執筆時点でstable版のsystemd（v257）では、IPv6のSIPサーバアドレスを取得できない。そのためv258のリリースを待つか、手動でキャプチャした内容をハードコードするほかない。~~
 
-[^7]: 仕方がないのでこのために[コントリビュートした](https://github.com/systemd/systemd/pull/38269)
-
-[^8]: `tshark -i wan0 -f "udp src port 547" -Y "dhcpv6.msgtype == 7 and dhcpv6.sip_server_a" -T ek -e dhcpv6.sip_server_a`
+systemd v258のリリースにより、[私のパッチ](https://github.com/systemd/systemd/pull/38269)がmainlineに入り、無事必要なすべての情報をD-Busから取得できるようになった。めでたしめでたし :tada:
 
 あとはこのスクリプトをsystemdサービスで実行するよう設定すれば完成だ。
 

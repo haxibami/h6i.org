@@ -1,7 +1,7 @@
 ---
 title: "systemdに全部賭けろ（第二部）"
 date: 2025-08-06
-lastmod: 2025-08-23
+lastmod: 2025-09-21
 description: "Linuxでルータを作る（基本機能構築編）"
 tags: ["bet-all-on-systemd", "tech", "network", "linux"]
 emoji: "🔗"
@@ -45,8 +45,6 @@ Id=10
 [NetDev]
 Name=hgw
 Kind=vlan
-# 一応 home とは別のMACアドレスにしておく
-MACAddress=de:ad:be:ef:00:03
 
 [VLAN]
 Id=100
@@ -80,20 +78,12 @@ RequiredForOnline=yes
 
 [Network]
 DHCP=ipv6
-# 起動ごとにリンクローカルアドレスを変える
-IPv6LinkLocalAddressGenerationMode=random
 IPv6Forwarding=yes
 IPv6AcceptRA=yes
 # 一時アドレスを割り当てる
 IPv6PrivacyExtensions=yes
 DHCPPrefixDelegation=yes
-Tunnel=mape0
-
-[Route]
-Gateway=_ipv6ra
-# TCPの初期ウィンドウサイズを大きくする
-InitialCongestionWindow=30
-InitialAdvertisedReceiveWindow=30
+Tunnel=ip6tnl0
 
 [DHCPv6]
 DUIDType=link-layer
@@ -113,32 +103,30 @@ Token=::ce
 
 CEアドレスは`Network.Address=`でも指定できるが、`DHCPPrefixDelegation.Token=`のほうが楽だ（プレフィックス部分を書かずに済むため）。
 
-そのほか、起動ごとにランダムなリンクローカルアドレスを割り当てる設定や、[TCPの初期ウィンドウサイズを大きくする](https://wiki.archlinux.org/title/Systemd-networkd#Speeding_up_TCP_slow-start)設定もしている。
-
 ひかり電話関連情報の取得については次回触れる。
 
 #### IPv4 over IPv6
 
-トンネルデバイス（`mape0`）を作成し、その上にトンネルを張る。
+トンネルデバイス（`ip6tnl0`）を作成し、その上にトンネルを張る。
 
-```systemd title="/etc/systemd/network/05-mape0.netdev"
+```systemd title="/etc/systemd/network/05-ip6tnl0.netdev"
 [NetDev]
-Name=mape0
+Name=ip6tnl0
 Kind=ip6tnl
 
 [Tunnel]
 Mode=ipip6
 # CEアドレス
-Local=3fff:0:0:ab00::ce
+Local=dhcp_pd
 # BRアドレス
 Remote=2001:db8::1
 DiscoverPathMTU=yes
 EncapsulationLimit=none
 ```
 
-```systemd title="/etc/systemd/network/05-mape0.network"
+```systemd title="/etc/systemd/network/05-ip6tnl0.network"
 [Match]
-Name=mape0
+Name=ip6tnl0
 
 [Link]
 RequiredForOnline=yes
@@ -152,59 +140,62 @@ LLMNR=no
 
 [Route]
 Gateway=0.0.0.0
-InitialCongestionWindow=30
-InitialAdvertisedReceiveWindow=30
 
 [QDisc]
 Parent=clsact
 Handle=ffff
 ```
 
-あとで`tc`のフィルタを付けるため、この時点でqdiscも設定している。
+あとで`tc`のフィルタを付けるため、この時点でベースとなるqdiscも設定している[^1]。
 
-なお`[Route]` セクションの代わりに、`Network.DefaultRouteOnDevice=yes` を指定することもできる。初期ウィンドウサイズの指定が不要な場合、そちらのほうが楽だろう。
+[^1]: ちなみに`clsact`というのは、それ自体は特に何もしない（フィルタなどをアタッチするためだけ）のqdiscで、ingressにもegressにも使えるらしい
+
+なお`[Route]` セクションの代わりに、`Network.DefaultRouteOnDevice=yes` を指定することもできる。細かい設定（`Route.InitialCongestionWindow`など）が不要な場合、そちらのほうが楽だろう。
 
 #### MAP-E関連の設定
 
-[前回紹介した記事](https://turgenev.hatenablog.com/entry/2024/04/23/031222)に倣い、`tc`を使ったNATなどを設定する。iptablesの代わりにnftablesを使い、MSSの自動調整を加えている点以外は、リンク先とほぼ同じだ[^1]。
+[前回紹介した記事](https://turgenev.hatenablog.com/entry/2024/04/23/031222)に倣い、`tc`を使ったNATなどを設定する。iptablesの代わりにnftablesを使い、TCP MSSの自動調整（MSS Clamping）を加えている点以外は、リンク先とほぼ同じだ[^2]。
 
-[^1]: とはいえ少しだけ改変している。主な差異は以下の通り：1. tc filterを付けるqdiscとして、`htb`ではなく`clsact`を使っている / 2. qdiscの追加はコマンドではなくsystemd-networkdの設定で（すでに）行っている / 3. fwmarkの下位2桁以外を無視するようにしている / 4. ICMP Time Exceeded（11）を加えている
+[^2]: とはいえ少しだけ改変している。主な差異は以下の通り：1. tcのqdiscとして`clsact`を使っている / 2. qdiscはsystemd-networkdですでに追加済み / 3. fwmarkの下位2桁以外を無視している / 4. `traceroute`に必要な、ICMP Time Exceeded（11）を処理している
 
-まずMSSの調整・fwmarkの付与・ソースNATをするnftablesのルールを書く。
+まずMSS Clamping・fwmarkの付与・ソースNATをするnftablesのルールを書く。
 
-```NFTables title="/etc/nftables.d/05-mape0.nft"
-#!/usr/sbin/nft -f
+```NFTables title="/etc/nftables.d/05-ip6tnl0.nft"
+#!/usr/bin/nft -f
 
 destroy table ip mape
-
 table ip mape {
-  chain mape-filter {
-    type filter hook postrouting priority filter - 5; policy accept;
+  chain mape-clamp {
+    type filter hook forward priority mangle - 5; policy accept;
     # TCP MSSの調整
-    iifname "mape0" counter tcp flags syn tcp option maxseg size set rt mtu
-    oifname "mape0" counter tcp flags syn tcp option maxseg size set rt mtu
+    iifname "ip6tnl0" counter tcp flags syn tcp option maxseg size set rt mtu
+    oifname "ip6tnl0" counter tcp flags syn tcp option maxseg size set rt mtu
+  }
+ 
+  chain mape-mark {
+    type filter hook postrouting priority filter - 5; policy accept;
     # fwmarkの付与
-    oifname "mape0" meta l4proto tcp mark set (mark & 0xffffff00) | 0x54 counter
-    oifname "mape0" meta l4proto udp mark set (mark & 0xffffff00) | 0x55 counter
-    oifname "mape0" ip protocol icmp icmp type { echo-request } mark set (mark & 0xffffff00) | 0x59 counter
+    oifname "ip6tnl0" meta l4proto tcp mark set mark & 0xffffff00 | 0x54 counter
+    oifname "ip6tnl0" meta l4proto udp mark set mark & 0xffffff00 | 0x55 counter
+    oifname "ip6tnl0" ip protocol icmp icmp type { echo-request } mark set mark & 0xffffff00 | 0x59 counter
   }
 
   chain mape-snat {
     type nat hook postrouting priority srcnat - 5; policy accept;
-    # ソースNAT（IPv4アドレスは前回計算したもの）
-    oifname "mape0" meta l4proto { tcp, udp, icmp } counter snat to 192.0.2.1:32784-33023
+    # ソースNAT
+    oifname "ip6tnl0" meta l4proto { tcp, udp, icmp } counter snat to 192.0.2.1:32784-33023
   }
 }
 ```
 
-起動時に実行すべき[^2]`tc`コマンドも、スクリプトにまとめておく。
+起動時に実行すべき[^3]`tc`コマンドも、スクリプトにまとめておく。
 
-[^2]: `tc`コマンドの効果は永続しないため、再起動ごとに実行する必要がある
+[^3]: `tc`コマンドの効果は永続しないため、再起動ごとに実行する必要がある
 
-```sh title="/usr/local/sbin/tc-mape0.sh"
+```sh title="/usr/local/sbin/tc-ip6tnl0.sh"
 #!/usr/bin/env bash
 
-DEVICE="mape0"
+DEVICE="ip6tnl0"
 PSID=ab
 
 # outbound
@@ -267,28 +258,28 @@ tc filter add dev $DEVICE ingress handle 0x89/0xff fw action pedit pedit munge o
 tc filter add dev $DEVICE ingress u32 match ip protocol 1 0xff match ip icmp_type 11 0xff match ip ihl 0x5 0xf match ip ihl 0x5 0xf at 28 match u16 0 1fff at 6 match ip sport "0x0${PSID}0" 0x0ff0 at 48 action skbedit mark 0x89/0xff continue
 ```
 
-`mape0`デバイスの存在が保証された時点でスクリプトを適用するよう、systemdサービスを設定する。
+このスクリプトを、`ip6tnl0`デバイスの存在が確認された時点で適用するよう、systemdサービスを設定する。
 
-```systemd title="/etc/systemd/system/tc-mape0.service"
+```systemd title="/etc/systemd/system/tc-ip6tnl0.service"
 [Unit]
 Description=Apply custom tc rules
 Wants=network-online.target
-# 下のように書くと、このサービスはmape0デバイスの設定完了後に実行される
-After=network-online.target sys-subsystem-net-devices-mape0.device
-BindsTo=sys-subsystem-net-devices-mape0.device
+# 下のように書くと、このサービスはip6tnl0デバイスの設定完了後に実行される
+After=network-online.target sys-subsystem-net-devices-ip6tnl0.device
+BindsTo=sys-subsystem-net-devices-ip6tnl0.device
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/tc-mape0.sh
-ExecStop=/usr/sbin/tc filter del dev mape0 egress && /usr/sbin/tc filter del dev mape0 ingress
+ExecStart=/usr/local/sbin/tc-ip6tnl0.sh
+ExecStop=/usr/bin/tc filter del dev ip6tnl0 egress && /usr/bin/tc filter del dev ip6tnl0 ingress
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 ```sh
-systemctl enable tc-mape0
+systemctl enable tc-ip6tnl0
 reboot
 ```
 
@@ -317,19 +308,13 @@ rtt min/avg/max/mdev = 7.172/7.458/7.839/0.280 ms
 
 ### 宅内機器側インターフェースの設定
 
-続いて宅内機器側のインターフェース（`home`）を設定する。
-
-- IPv6はSLAAC + RDNSS
-- IPv4はDHCPv4
-
-で配布する、ごくオーソドックスな構成である。
+続いて宅内機器側のインターフェース（`home`）を設定する。IPv6はSLAAC + RDNSS、IPv4はDHCPv4でそれぞれ配布している。
 
 ```systemd title="/etc/systemd/network/10-home.network" {23,28}
 [Match]
 Name=home
 
 [Network]
-IPv6StableSecretAddress=xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx
 IPv6Forwarding=yes
 IPv6AcceptRA=no
 IPv6SendRA=yes
@@ -372,7 +357,7 @@ Address=10.0.0.2
 networkctl reload
 ```
 
-設定を読み込み、クライアント端末をスイッチの適切なポートに繋げば、ルータとして動作していることがわかる。
+設定を再度読み込み、クライアント端末をスイッチの適切なポートに繋げば、ルータとして動作していることがわかるはずだ。
 
 **なお、この時点で接続した端末はインターネットに露出するので注意すること。**
 
@@ -384,16 +369,10 @@ networkctl reload
 #!/usr/bin/nft -f
 
 destroy table inet filter
-
 table inet filter {
   set LANv4 {
     type ipv4_addr; flags interval;
     elements = { 10.0.0.0/24 }
-  }
-
-  set LANv6 {
-    type ipv6_addr; flags interval;
-    elements = { fe80::/10 }
   }
 
   chain input {
@@ -412,32 +391,26 @@ table inet filter {
     icmpv6 type { echo-request, nd-router-solicit } iifname "home" counter accept
     icmp type { destination-unreachable, time-exceeded, parameter-problem } limit rate 5/second burst 10 packets accept
     icmp type { echo-request } iifname { "home" } accept
-    udp dport dhcpv6-client udp sport dhcpv6-server iif "wan0" ip6 saddr fe80::/10 counter accept
+    udp dport dhcpv6-client iif "wan0" ip6 saddr fe80::/64 counter accept
     udp dport bootps iifname "home" accept
-    ip saddr @LANv4 jump lan-input
-    ip6 saddr @LANv6 iifname { "home" } jump lan-input
+    ip saddr @LANv4 iifname { "home" } jump lan-services
+    ip6 saddr fe80::/64 iifname { "home" } jump lan-services
     counter
   }
 
-  chain lan-input {
+  chain lan-services {
     meta l4proto { tcp, udp } th dport { ssh, domain } accept
   }
 
   chain forward {
     type filter hook forward priority filter; policy drop;
-    tcp flags & (fin | syn | rst | ack) != syn ct state new jump tcp-reconnect
     ct state invalid drop; ct state { established, related } accept;
     icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } counter accept
     icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
-    meta l4proto { tcp, udp } th dport { 135, 137-139, 445 } oifname { "wan0", "mape0" } counter drop comment "NetBIOS"
-    iifname "home" oif "wan0" accept comment "v4"
-    iifname "home" oifname "mape0" accept comment "v6"
+    meta l4proto { tcp, udp } th dport { 135, 137-139, 445 } oifname { "wan0", "ip6tnl0" } counter drop comment "NetBIOS"
+    iifname "home" oif "wan0" accept comment "v6"
+    iifname "home" oifname "ip6tnl0" accept comment "v4"
     counter
-  }
-
-  chain tcp-reconnect {
-    meta protocol ip6 iifname "home" counter accept
-    meta protocol ip iifname { "home" } counter reject with tcp reset
   }
 }
 
