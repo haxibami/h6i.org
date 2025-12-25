@@ -9,10 +9,10 @@
       "**/*.jsx",
       "**/*.json",
       "**/*.jsonc",
-      "!node_modules/**",
-      "!public/**",
-      "!dist/**",
-      "!.astro/**"
+      "!node_modules",
+      "!public",
+      "!dist",
+      "!.astro"
     ]
   },
   "linter": {
