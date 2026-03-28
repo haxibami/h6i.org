@@ -34,7 +34,7 @@
     "@pagefind/default-ui": "1.4.0",
     "astro": "6.1.1",
     "astro-expressive-code": "0.41.7",
-    "astro-purgecss": "5.5.0",
+    "astro-purgecss": "6.0.1",
     "budoux": "0.8.0",
     "fetch-site-metadata": "0.2.0",
     "hastscript": "9.0.1",
