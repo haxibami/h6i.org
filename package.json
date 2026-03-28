@@ -40,7 +40,7 @@
     "hastscript": "9.0.1",
     "katex": "0.16.44",
     "pagefind": "1.4.0",
-    "purgecss": "7.0.2",
+    "purgecss": "8.0.0",
     "react": "19.2.4",
     "rehype-autolink-headings": "7.1.0",
     "rehype-katex": "7.0.1",
