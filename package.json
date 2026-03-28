@@ -52,7 +52,7 @@
     "remark-math": "6.0.0",
     "satori": "0.26.0",
     "sharp": "0.34.5",
-    "shiki": "3.23.0",
+    "shiki": "4.0.2",
     "tailwindcss": "4.2.2",
     "unified": "11.0.5",
     "unist-util-visit": "5.1.0"
